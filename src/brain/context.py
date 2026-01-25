@@ -5,10 +5,15 @@ FSDTrader Brain Module: Context Builder
 Transforms raw market state into rich, human-readable context for the LLM.
 """
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
+from collections import deque
 
 from .types import Decision
+
+
+# Type alias for price history entry: (timestamp, price, label)
+PriceHistoryEntry = Tuple[datetime, float, Optional[str]]
 
 
 class ContextBuilder:
@@ -19,8 +24,38 @@ class ContextBuilder:
     that helps the LLM understand the current market situation.
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, max_price_history: int = 24):
+        """
+        Initialize the context builder.
+
+        Args:
+            max_price_history: Maximum number of price history entries to keep
+                              (24 entries at 5-second intervals = 2 minutes)
+        """
+        self._price_history: deque = deque(maxlen=max_price_history)
+
+    def record_price(
+        self,
+        price: float,
+        timestamp: Optional[datetime] = None,
+        label: Optional[str] = None
+    ) -> None:
+        """
+        Record a price point for the price history.
+
+        Args:
+            price: The price to record
+            timestamp: When the price was recorded (defaults to now)
+            label: Optional label for significant price events
+                   (e.g., "Session high", "Broke VWAP", "Support test")
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+        self._price_history.append((timestamp, price, label))
+
+    def clear_price_history(self) -> None:
+        """Clear the price history (e.g., at start of new session)."""
+        self._price_history.clear()
 
     def build(
         self,
@@ -44,6 +79,7 @@ class ContextBuilder:
         sections = [
             self._build_position_section(account_state, active_orders),
             self._build_session_context(market_state),
+            self._build_price_history(market_state),
             self._build_key_levels(market_state),
             self._build_order_book(market_state),
             self._build_tape_analysis(market_state),
@@ -51,6 +87,7 @@ class ContextBuilder:
             self._build_absorption(market_state),
             self._build_history(history),
             self._build_raw_data(market_state),
+            self._build_closing_question(),
         ]
 
         return "\n\n".join(sections)
@@ -157,6 +194,105 @@ FLAT - Looking for entry opportunity."""
 │
 ├── RVOL: {rvol:.1f}x ({rvol_label})
 └── Current Spread: ${spread:.2f} ({spread_status})"""
+
+    def _build_price_history(self, market_state: Dict[str, Any]) -> str:
+        """
+        Build the price history section showing recent price movement.
+
+        Per prompt guide v3: Shows last 2 minutes of price action to help
+        the LLM identify trends like "lower highs" or "higher lows".
+        """
+        if not self._price_history:
+            return """## PRICE ACTION (Last 2 Minutes)
+
+(No price history available yet)"""
+
+        mkt = market_state.get("MARKET_STATE", market_state)
+        current_price = mkt.get("LAST", 0)
+        vwap = mkt.get("VWAP", 0)
+        hod = mkt.get("HOD", 0)
+        lod = mkt.get("LOD", 0)
+
+        lines = ["## PRICE ACTION (Last 2 Minutes)", ""]
+
+        # Get price history entries
+        history_list = list(self._price_history)
+
+        # Calculate pattern indicators
+        if len(history_list) >= 4:
+            # Check for lower highs / higher lows pattern
+            prices = [entry[1] for entry in history_list]
+            recent_prices = prices[-8:] if len(prices) >= 8 else prices
+
+            # Find local highs and lows in recent prices
+            highs = []
+            lows = []
+            for i in range(1, len(recent_prices) - 1):
+                if recent_prices[i] > recent_prices[i-1] and recent_prices[i] > recent_prices[i+1]:
+                    highs.append(recent_prices[i])
+                if recent_prices[i] < recent_prices[i-1] and recent_prices[i] < recent_prices[i+1]:
+                    lows.append(recent_prices[i])
+
+            # Determine pattern
+            pattern = None
+            if len(highs) >= 2:
+                if all(highs[i] < highs[i-1] for i in range(1, len(highs))):
+                    pattern = "Lower highs forming - potential weakness"
+                elif all(highs[i] > highs[i-1] for i in range(1, len(highs))):
+                    pattern = "Higher highs forming - potential strength"
+            if len(lows) >= 2:
+                if all(lows[i] > lows[i-1] for i in range(1, len(lows))):
+                    if pattern:
+                        pattern += ", higher lows"
+                    else:
+                        pattern = "Higher lows forming - buyers stepping in"
+                elif all(lows[i] < lows[i-1] for i in range(1, len(lows))):
+                    if pattern:
+                        pattern += ", lower lows"
+                    else:
+                        pattern = "Lower lows forming - sellers in control"
+
+        # Format the price entries (show last 8-12 entries for readability)
+        display_entries = history_list[-12:]
+        for timestamp, price, label in display_entries:
+            time_str = timestamp.strftime("%H:%M:%S")
+
+            # Add context labels
+            context_parts = []
+            if label:
+                context_parts.append(label)
+            if price == hod and hod > 0:
+                context_parts.append("HOD")
+            elif price == lod and lod > 0:
+                context_parts.append("LOD")
+            if abs(price - vwap) < 0.02 and vwap > 0:
+                context_parts.append("at VWAP")
+
+            context_str = f"  ({', '.join(context_parts)})" if context_parts else ""
+            lines.append(f"{time_str}  ${price:.2f}{context_str}")
+
+        # Add current price with NOW marker
+        now_str = datetime.now().strftime("%H:%M:%S")
+        lines.append(f"{now_str}  ${current_price:.2f}  <- NOW")
+
+        # Add pattern interpretation if detected
+        if len(history_list) >= 4:
+            lines.append("")
+            if pattern:
+                lines.append(f"PATTERN: {pattern}")
+            else:
+                # Calculate simple trend from first to last
+                first_price = history_list[0][1]
+                price_change = current_price - first_price
+                pct_change = (price_change / first_price * 100) if first_price > 0 else 0
+                if abs(pct_change) < 0.05:
+                    lines.append("PATTERN: Consolidating, no clear direction")
+                elif price_change > 0:
+                    lines.append(f"PATTERN: Uptrend (+${price_change:.2f}, +{pct_change:.2f}%)")
+                else:
+                    lines.append(f"PATTERN: Downtrend (${price_change:.2f}, {pct_change:.2f}%)")
+
+        return "\n".join(lines)
 
     def _build_key_levels(self, market_state: Dict[str, Any]) -> str:
         """Build the key levels section."""
@@ -396,6 +532,17 @@ FLAT - Looking for entry opportunity."""
 {json.dumps(simplified, indent=2)}
 ```"""
 
+    def _build_closing_question(self) -> str:
+        """
+        Build the closing question that prompts the LLM for a decision.
+
+        Per prompt guide v3: End with a clear question that sets up
+        the expected response format.
+        """
+        return """---
+
+What's your read? Walk me through your analysis, then call the appropriate tool for your decision."""
+
 
 # Module-level instance for convenience
 _builder = ContextBuilder()
@@ -420,3 +567,33 @@ def build_context(
         Formatted context string
     """
     return _builder.build(market_state, account_state, history, active_orders)
+
+
+def record_price(
+    price: float,
+    timestamp: Optional[datetime] = None,
+    label: Optional[str] = None
+) -> None:
+    """
+    Record a price point for the price history.
+
+    Call this function periodically (every ~5 seconds) to build up
+    price history that will be included in the LLM context.
+
+    Args:
+        price: The price to record
+        timestamp: When the price was recorded (defaults to now)
+        label: Optional label for significant price events
+               (e.g., "Session high", "Broke VWAP", "Support test")
+    """
+    _builder.record_price(price, timestamp, label)
+
+
+def clear_price_history() -> None:
+    """Clear the price history (e.g., at start of new session)."""
+    _builder.clear_price_history()
+
+
+def get_context_builder() -> ContextBuilder:
+    """Get the module-level ContextBuilder instance."""
+    return _builder

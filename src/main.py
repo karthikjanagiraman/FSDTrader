@@ -19,10 +19,26 @@ import asyncio
 import logging
 import argparse
 import warnings
+from pathlib import Path
 from colorama import Fore, Style, init
 
 # Suppress deprecation warnings from databento
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Load environment variables from .env file
+def load_dotenv():
+    """Load environment variables from .env file if it exists."""
+    project_root = Path(__file__).parent.parent
+    env_file = project_root / ".env"
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
+load_dotenv()
 
 # Local imports
 from market_data import IBKRConnector
@@ -65,11 +81,14 @@ class FSDTrader:
 
     def __init__(self, symbol: str, mode: str = "paper",
                  backtest_date: str = None, backtest_speed: float = 10.0,
+                 backtest_start_time: str = "09:30:00", backtest_end_time: str = "16:00:00",
                  provider: str = "grok", model: str = None):
         self.symbol = symbol
         self.mode = mode  # "live", "paper", "sim", "backtest"
         self.backtest_date = backtest_date
         self.backtest_speed = backtest_speed
+        self.backtest_start_time = backtest_start_time
+        self.backtest_end_time = backtest_end_time
         self.logger = setup_logging()
 
         # Risk limits
@@ -133,9 +152,12 @@ class FSDTrader:
 
         self.logger.info(f"{Fore.CYAN}Starting BACKTEST mode")
 
-        # Initialize replay connector
+        # Initialize replay connector (path relative to project root)
+        import os
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        data_dir = os.path.join(project_root, "BacktestData", "TSLA-L3DATA")
         self.connector = MBOReplayConnector(
-            data_dir="BacktestData/TSLA-L3DATA",
+            data_dir=data_dir,
             date=self.backtest_date,
             symbol=self.symbol
         )
@@ -160,11 +182,12 @@ class FSDTrader:
 
         # Start replay
         self.running = True
+        self.logger.info(f"Time range: {self.backtest_start_time} - {self.backtest_end_time}")
         await self.connector.start_replay(
             speed=self.backtest_speed,
             on_state_update=self._on_backtest_state,
-            start_time="09:30:00",
-            end_time="16:00:00"
+            start_time=self.backtest_start_time,
+            end_time=self.backtest_end_time
         )
 
         # Generate report
@@ -448,6 +471,8 @@ async def main():
     parser.add_argument("--backtest", action="store_true", help="Backtest with real L3 data")
     parser.add_argument("--date", type=str, default=None, help="Backtest date (YYYYMMDD)")
     parser.add_argument("--speed", type=float, default=100.0, help="Backtest speed multiplier")
+    parser.add_argument("--start-time", type=str, default="09:30:00", help="Backtest start time (HH:MM:SS)")
+    parser.add_argument("--end-time", type=str, default="16:00:00", help="Backtest end time (HH:MM:SS)")
     parser.add_argument("--provider", type=str, default="grok",
                         help="LLM provider (grok, openai, anthropic)")
     parser.add_argument("--model", type=str, default=None,
@@ -469,6 +494,8 @@ async def main():
         mode=mode,
         backtest_date=args.date,
         backtest_speed=args.speed,
+        backtest_start_time=args.start_time,
+        backtest_end_time=args.end_time,
         provider=args.provider,
         model=args.model,
     )

@@ -35,7 +35,7 @@ class GrokProvider(LLMProvider):
         self,
         api_key: str,
         model: Optional[str] = None,
-        timeout: float = 5.0,
+        timeout: float = 30.0,
         **kwargs
     ):
         """
@@ -235,21 +235,27 @@ class GrokProvider(LLMProvider):
         }
 
         Args:
-            tools: Tools in canonical format
+            tools: Tools in canonical format or already in OpenAI format
 
         Returns:
             Tools in Grok/OpenAI format
         """
         formatted = []
         for tool in tools:
-            formatted.append({
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
-                }
-            })
+            # Check if already in OpenAI format (has "function" key with "name" inside)
+            if "function" in tool and "name" in tool["function"]:
+                # Already formatted, pass through
+                formatted.append(tool)
+            else:
+                # Convert from canonical format
+                formatted.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+                    }
+                })
         return formatted
 
     def parse_tool_calls(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
