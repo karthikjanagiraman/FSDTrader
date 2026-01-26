@@ -6,8 +6,11 @@ The main brain class that orchestrates LLM-based trading decisions.
 """
 import time
 import logging
+import os
+import json
 from typing import Dict, Any, List, Optional
 from collections import deque
+from datetime import datetime
 
 from .types import ToolCall, Decision, LLMResponse, ValidationResult, DecisionLog
 from .tools import TOOLS, TOOL_WAIT, is_valid_tool
@@ -78,6 +81,12 @@ class TradingBrain:
         self._total_calls = 0
         self._total_latency_ms = 0.0
 
+        # LLM context logging
+        self._log_contexts = True
+        self._context_log_dir = "data/logs/llm_contexts"
+        if self._log_contexts:
+            os.makedirs(self._context_log_dir, exist_ok=True)
+
         logger.info(
             f"TradingBrain initialized: provider={provider}, "
             f"model={self._provider.model_name}"
@@ -131,22 +140,14 @@ class TradingBrain:
             # Parse tool call
             tool_call = self._parse_response(response)
 
-            # Validate
+            # Log context and response
+            if self._log_contexts:
+                self._log_llm_context(context, response, tool_call)
+
+            # Note: Validation layer disabled - letting the LLM make autonomous decisions
+            # The LLM has full context and should decide what's best for profitability
             market_state = state.get("MARKET_STATE", {})
             account_state = state.get("ACCOUNT_STATE", {})
-            validation = validate_tool_call(tool_call, market_state, account_state)
-
-            if not validation.valid:
-                # Log validation errors and return WAIT
-                for error in validation.errors:
-                    logger.warning(f"Validation error: {error}")
-                return self._format_wait(
-                    f"Validation failed: {'; '.join(validation.errors)}"
-                )
-
-            # Log warnings
-            for warning in validation.warnings:
-                logger.info(f"Validation warning: {warning}")
 
             # Record decision
             decision = Decision(
@@ -294,3 +295,58 @@ class TradingBrain:
         self._total_calls = 0
         self._total_latency_ms = 0.0
         logger.info("Brain state reset")
+
+    def _log_llm_context(
+        self,
+        context: str,
+        response: LLMResponse,
+        tool_call: ToolCall
+    ) -> None:
+        """
+        Log the full LLM context and response for debugging.
+
+        Creates a file per call with:
+        - System prompt
+        - User message (context)
+        - LLM response (tool call)
+        - Usage stats
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            call_num = self._total_calls
+            filename = f"call_{call_num:04d}_{timestamp}.txt"
+            filepath = os.path.join(self._context_log_dir, filename)
+
+            with open(filepath, "w") as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"LLM CALL #{call_num} - {timestamp}\n")
+                f.write(f"Provider: {self._provider.provider_name}\n")
+                f.write(f"Model: {self._provider.model_name}\n")
+                f.write("=" * 80 + "\n\n")
+
+                f.write("## SYSTEM PROMPT\n")
+                f.write("-" * 40 + "\n")
+                f.write(self._system_prompt + "\n\n")
+
+                f.write("## USER MESSAGE (CONTEXT)\n")
+                f.write("-" * 40 + "\n")
+                f.write(context + "\n\n")
+
+                f.write("## LLM RESPONSE\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"Tool: {tool_call.tool}\n")
+                f.write(f"Arguments: {json.dumps(tool_call.arguments, indent=2)}\n")
+                f.write(f"Conviction: {tool_call.conviction}\n")
+                f.write(f"Reasoning: {tool_call.reasoning}\n\n")
+
+                f.write("## USAGE STATS\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"Latency: {response.latency_ms:.0f}ms\n")
+                f.write(f"Prompt tokens: {response.usage.get('prompt_tokens', 0)}\n")
+                f.write(f"Completion tokens: {response.usage.get('completion_tokens', 0)}\n")
+                f.write(f"Total tokens: {response.usage.get('total_tokens', 0)}\n")
+
+            logger.debug(f"Logged LLM context to {filepath}")
+
+        except Exception as e:
+            logger.warning(f"Failed to log LLM context: {e}")

@@ -6,6 +6,7 @@ Provider factory and exports.
 """
 from .base import LLMProvider
 from .grok import GrokProvider
+from .groq import GroqProvider
 
 
 def get_provider(provider_name: str, **kwargs) -> LLMProvider:
@@ -13,7 +14,7 @@ def get_provider(provider_name: str, **kwargs) -> LLMProvider:
     Factory function to get an LLM provider instance.
 
     Args:
-        provider_name: Name of the provider ("grok", "openai", "anthropic")
+        provider_name: Name of the provider ("grok", "groq", "openai", "anthropic")
         **kwargs: Provider-specific configuration
 
     Returns:
@@ -24,6 +25,7 @@ def get_provider(provider_name: str, **kwargs) -> LLMProvider:
     """
     providers = {
         "grok": GrokProvider,
+        "groq": GroqProvider,
         # Future providers:
         # "openai": OpenAIProvider,
         # "anthropic": AnthropicProvider,
@@ -40,5 +42,6 @@ def get_provider(provider_name: str, **kwargs) -> LLMProvider:
 __all__ = [
     "LLMProvider",
     "GrokProvider",
+    "GroqProvider",
     "get_provider",
 ]

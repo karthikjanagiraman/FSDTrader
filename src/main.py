@@ -91,12 +91,12 @@ class FSDTrader:
         self.backtest_end_time = backtest_end_time
         self.logger = setup_logging()
 
-        # Risk limits
+        # Risk limits - spread increased for market open conditions
         self.risk_limits = RiskLimits(
             max_position_size=100,
             max_daily_loss=-500.0,
             max_daily_trades=10,
-            max_spread=0.05
+            max_spread=0.20  # Allow wider spreads during open drive
         )
 
         # Get API key from environment based on provider
@@ -120,6 +120,7 @@ class FSDTrader:
         """Get API key from environment for the specified provider."""
         env_vars = {
             "grok": ["GROK_API_KEY", "XAI_API_KEY"],
+            "groq": ["GROQ_API_KEY"],
             "openai": ["OPENAI_API_KEY"],
             "anthropic": ["ANTHROPIC_API_KEY"],
         }

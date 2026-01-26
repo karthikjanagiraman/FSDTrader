@@ -53,11 +53,10 @@ data/logs/
 secrets/
 credentials/
 
-# Data files (too large for git)
-BacktestData/
+# Data files (large files tracked by Git LFS)
+# BacktestData/ - now tracked via Git LFS
 data/*.dbn
 data/*.zst
-*.dbn.zst
 
 # Claude Code
 .claude/

@@ -136,66 +136,90 @@ class MBOReplayConnector:
         
         self.logger.info(f"Subscribed to {symbol} replay data")
     
-    async def start_replay(self, speed: float = 1.0, 
+    async def start_replay(self, speed: float = 1.0,
                            on_state_update: Callable = None,
                            start_time: str = "09:30:00",
-                           end_time: str = "16:00:00"):
+                           end_time: str = "16:00:00",
+                           decision_interval: float = 5.0):
         """
         Start replaying the data.
-        
+
         Args:
             speed: Playback speed (1.0 = real-time, 10.0 = 10x, 0 = as fast as possible)
-            on_state_update: Callback called every N events with current state
+            on_state_update: Callback called every decision_interval of SIMULATION time
             start_time: Start time in HH:MM:SS (default market open)
             end_time: End time in HH:MM:SS (default market close)
+            decision_interval: Seconds of simulation time between decisions (default 5.0)
         """
         self.replay_speed = speed
         self.is_replaying = True
-        
+
         # Filter events to market hours
         events_to_replay = self._filter_market_hours(start_time, end_time)
         total_events = len(events_to_replay)
-        
+
+        if total_events == 0:
+            self.logger.warning("No events to replay in the specified time range")
+            return
+
         self.logger.info(f"Starting replay: {total_events:,} events at {speed}x speed")
-        
+        self.logger.info(f"Decision interval: {decision_interval}s of simulation time")
+
+        # Initialize simulation time tracking
+        first_event_ts = events_to_replay[0].ts_event / 1e9
+        self.current_simulation_time = first_event_ts
+        last_decision_sim_time = first_event_ts  # Track last decision in SIMULATION time
+
         last_ts = None
-        self.current_simulation_time = 0.0
-        last_state_update = time.time()
-        state_update_interval = 5.0  # Update state every 5 seconds for testing
-        
+        last_progress_log = time.time()
+
         for i, event in enumerate(events_to_replay):
             if not self.is_replaying:
                 break
-            
+
             # Process the event
             self._process_mbo_event(event)
             self.events_processed += 1
-            
-            # Timing control
+
+            # Update simulation time
+            self.current_simulation_time = event.ts_event / 1e9
+
+            # Check if enough SIMULATION time has passed for a decision
+            sim_time_elapsed = self.current_simulation_time - last_decision_sim_time
+
+            if on_state_update and sim_time_elapsed >= decision_interval:
+                # Get current market state
+                state = self.get_full_state(self.symbol)
+                if state:
+                    # Add simulation timestamp to state
+                    state["SIM_TIMESTAMP"] = self.current_simulation_time
+
+                    # Call the callback (this may take time for LLM calls)
+                    # Simulation PAUSES here while waiting for the decision
+                    await on_state_update(state)
+
+                # Update last decision time in SIMULATION time (not wall clock)
+                last_decision_sim_time = self.current_simulation_time
+
+            # Timing control for playback speed (optional, can be 0 for max speed)
             if speed > 0 and last_ts is not None:
                 event_ts = event.ts_event
                 time_diff_ns = event_ts - last_ts
                 sleep_time = (time_diff_ns / 1e9) / speed
-                
+
                 # Cap sleep time to avoid long waits
                 if sleep_time > 0.001:  # > 1ms
                     await asyncio.sleep(min(sleep_time, 0.1))
-            
+
             last_ts = event.ts_event
-            self.current_simulation_time = event.ts_event / 1e9
-            
-            # Call state update callback periodically
-            if on_state_update and time.time() - last_state_update > state_update_interval:
-                state = self.get_full_state(self.symbol)
-                if state:
-                    await on_state_update(state)
-                last_state_update = time.time()
-            
-            # Progress logging
-            if i > 0 and i % 100000 == 0:
+
+            # Progress logging (wall clock based, just for user feedback)
+            if time.time() - last_progress_log > 2.0:  # Log every 2 seconds of real time
                 pct = (i / total_events) * 100
-                self.logger.info(f"Replay progress: {pct:.1f}% ({i:,}/{total_events:,})")
-        
+                sim_time_str = time.strftime('%H:%M:%S', time.gmtime(self.current_simulation_time % 86400))
+                self.logger.info(f"Replay: {pct:.1f}% | Sim time: {sim_time_str} | Events: {i:,}/{total_events:,}")
+                last_progress_log = time.time()
+
         self.is_replaying = False
         self.logger.info(f"Replay complete: {self.events_processed:,} events, {self.trades_count:,} trades")
     
@@ -386,7 +410,7 @@ class MBOReplayConnector:
         metrics = self.metrics[symbol]
         
         last_price = metrics.last_price
-        vel_label, vel_tps = tape.get_velocity()
+        vel_label, vel_tps = tape.get_velocity(timestamp=self.current_simulation_time)
         vah, val = profile.get_value_area()
         absorption = absorber.detect()
         
