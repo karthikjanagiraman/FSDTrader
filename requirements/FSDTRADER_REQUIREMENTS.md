@@ -1,7 +1,7 @@
 # FSDTrader: Comprehensive System Requirements & Design
 
-**Version:** 2.0.0
-**Date:** 2025-01-24
+**Version:** 3.0.0
+**Date:** 2026-01-26
 **Status:** Implementation Complete
 
 ---
@@ -65,13 +65,13 @@ FSDTrader is an autonomous day trading system for TSLA that uses Large Language 
         │                         │                         │
    ┌────┴────────┐          ┌─────┴─────┐            ┌──────┴──────┐
    ▼             ▼          ▼           ▼            ▼             ▼
-┌──────────┐ ┌──────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌──────────┐
-│   IBKR   │ │   MBO    │ │  Grok   │ │ OpenAI  │ │Simulated │ │   IBKR   │
-│ Connector│ │ Replay   │ │Provider │ │ Provider│ │ Executor │ │ Executor │
-└──────────┘ └──────────┘ └─────────┘ └─────────┘ └──────────┘ └──────────┘
-     │            │             │           │            │            │
-     ▼            ▼             ▼           ▼            ▼            ▼
-  TWS API   Databento DBN    xAI API   OpenAI API  Virtual Acc   Real Orders
+┌──────────┐ ┌──────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌──────────┐
+│   IBKR   │ │   MBO    │ │  Grok   │ │  Groq   │ │ OpenAI  │ │Simulated │ │   IBKR   │
+│ Connector│ │ Replay   │ │Provider │ │ Provider│ │ Provider│ │ Executor │ │ Executor │
+└──────────┘ └──────────┘ └─────────┘ └─────────┘ └─────────┘ └──────────┘ └──────────┘
+     │            │             │           │           │            │            │
+     ▼            ▼             ▼           ▼           ▼            ▼            ▼
+  TWS API   Databento DBN    xAI API   Groq API   OpenAI API  Virtual Acc   Real Orders
 ```
 
 ### 2.2 Module Responsibilities
@@ -518,6 +518,8 @@ class TradeRecord:
 
 Virtual order execution for backtest/simulation modes.
 
+> **Note (v3.0.0):** Execution-level validation (position size, stop distance, target direction) has been disabled in both `SimulatedExecutor` and `IBKRExecutor`. The LLM has full context and autonomously decides what's appropriate for each trade. The only remaining check is duplicate position prevention (`ALREADY_IN_POSITION`).
+
 **Fill Logic**:
 
 ```python
@@ -630,17 +632,18 @@ def execute(self, command: str, current_spread: float = 0.0,
 ├──────────────────────────────────────────────────────────────┤
 │  System Prompt (persona, strategy, rules)                     │
 │  Tool Definitions (enter_long, wait, etc.)                    │
-│  Context Builder (market state → LLM context)                 │
+│  Context Builder (shared instance for price history)          │
 │  Decision History (last N decisions for continuity)          │
-│  Validator (pre-flight checks on tool calls)                 │
+│  Session Logger (one file per backtest session)              │
+│  Validator (DISABLED - LLM handles all validation)           │
 └───────────────────────┬──────────────────────────────────────┘
                         │
-          ┌─────────────┴─────────────┐
-          ▼                           ▼
-    ┌──────────┐               ┌──────────┐
-    │   Grok   │               │  OpenAI  │
-    │ Provider │               │ Provider │
-    └──────────┘               └──────────┘
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+    ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │   Grok   │  │   Groq   │  │  OpenAI  │
+    │ Provider │  │ Provider │  │ Provider │
+    └──────────┘  └──────────┘  └──────────┘
 ```
 
 ### 6.2 System Prompt
@@ -713,22 +716,18 @@ Status: {account['POSITION_SIDE']}
 ### 6.5 Decision Flow
 
 1. **Receive State**: Market snapshot from connector
-2. **Build Context**: Format state for LLM consumption
+2. **Build Context**: Format state for LLM consumption (uses shared ContextBuilder with price history)
 3. **Add History**: Include recent decisions for continuity
 4. **Call LLM**: Send context with tool definitions
 5. **Parse Response**: Extract tool call and arguments
-6. **Validate**: Pre-flight checks (position state, limits)
+6. **Log**: Append context + response to session log file
 7. **Return Command**: Formatted command string for executor
 
-### 6.6 Validation
+> **Note (v3.0.0):** Brain-level validation (step 6 in v2.0.0) has been disabled. The LLM makes autonomous decisions without pre-flight checks on stop distance, position size, or risk/reward. The validation module exists in code but `validate_tool_call()` is not called.
 
-Pre-execution validation ensures:
+### 6.6 Validation (DISABLED)
 
-- Tool is valid and appropriate for current position state
-- Required arguments are present
-- Prices are in valid ranges
-- Stop distance within limits
-- Risk/reward meets minimum
+The validation framework exists but is **not active**. The LLM is trusted to make appropriate decisions based on the full context it receives including risk parameters in the system prompt.
 
 ```python
 @dataclass
@@ -738,11 +737,55 @@ class ValidationResult:
     warnings: List[str]
 ```
 
+### 6.7 Session Logging
+
+LLM context logging uses one file per backtest session (not per call):
+
+```python
+# Session log file: data/logs/llm_contexts/session_YYYYMMDD_HHMMSS.txt
+#
+# Each call appends:
+# - Call number and timestamp
+# - System prompt (first call only)
+# - User message (context)
+# - LLM response (tool call, arguments, conviction, reasoning)
+# - Usage stats (latency, token counts)
+```
+
+### 6.8 Shared Context Builder
+
+The `ContextBuilder` is a shared module-level instance (via `get_context_builder()`) so that `record_price()` calls from `main.py` and the brain's context building use the same price history:
+
+```python
+# main.py records prices during backtest loop
+from brain.context import record_price, clear_price_history
+record_price(last_price, price_time, label)  # e.g., label="HOD test"
+
+# brain.py uses the shared instance
+self._context_builder = get_context_builder()  # Same instance
+```
+
+### 6.9 LLM Providers
+
+| Provider | API | Default Model | Key Feature |
+|----------|-----|---------------|-------------|
+| Grok | xAI (`api.x.ai`) | `grok-3-mini-fast` | xAI native |
+| Groq | Groq (`api.groq.com`) | `llama-3.3-70b-versatile` | Ultra-fast inference (10-30x) |
+| OpenAI | OpenAI (`api.openai.com`) | `gpt-4o` | GPT-4 family |
+
+All providers implement the `LLMProvider` interface with OpenAI-compatible chat completions + tool calling.
+
 ---
 
 ## 7. Risk Management
 
-### 7.1 Risk Limits
+### 7.1 Philosophy (v3.0.0)
+
+> **LLM-Driven Risk Management**: As of v3.0.0, all hard-coded validation has been disabled at both the brain and execution layers. The LLM receives full market context (including risk parameters in the system prompt) and makes autonomous decisions about position sizing, stop distance, and entry conditions. This allows the LLM to adapt its risk management to market conditions rather than being constrained by static rules.
+
+### 7.2 Risk Limits (Reference Only)
+
+The `RiskLimits` data class still exists but its validations are **not enforced**:
 
 ```python
 @dataclass
@@ -757,23 +800,36 @@ class RiskLimits:
     # Entry conditions
     max_spread: float = 0.15            # Session-aware
 
-    # Stop distance
+    # Stop distance (NOT ENFORCED)
     min_stop_distance: float = 0.10     # $0.10 minimum
     max_stop_distance: float = 0.30     # $0.30 maximum
 ```
 
-### 7.2 Enforcement Points
+### 7.3 Enforcement Points
 
-| Check | Location | Action |
-|-------|----------|--------|
-| Daily loss limit | Main loop | Stop trading session |
-| Daily trade limit | Executor.execute() | Reject new entries |
-| Spread limit | Executor.execute() | Reject entry if too wide |
-| Stop distance | submit_bracket_order() | Reject if out of range |
-| Position size | submit_bracket_order() | Reject if exceeds max |
-| Already in position | submit_bracket_order() | Reject duplicate entry |
+| Check | Location | Status | Action |
+|-------|----------|--------|--------|
+| Daily loss limit | Main loop | **ACTIVE** | Stop trading session |
+| Daily trade limit | Executor.execute() | **ACTIVE** | Reject new entries |
+| Spread limit | Executor.execute() | **ACTIVE** | Reject entry if too wide |
+| Stop distance | submit_bracket_order() | **DISABLED** | ~~Reject if out of range~~ |
+| Position size | submit_bracket_order() | **DISABLED** | ~~Reject if exceeds max~~ |
+| Target direction | submit_bracket_order() | **DISABLED** | ~~Reject if wrong direction~~ |
+| Already in position | submit_bracket_order() | **ACTIVE** | Reject duplicate entry |
+| Brain validation | brain.py think() | **DISABLED** | ~~Pre-flight checks~~ |
 
-### 7.3 Spread Limits by Session
+### 7.4 What the LLM Controls
+
+The LLM now has full autonomy over:
+- **Position size** (no max limit enforced)
+- **Stop distance** (no min/max enforced)
+- **Target placement** (no direction check enforced)
+- **Risk/reward ratio** (guidelines in prompt only)
+- **Entry timing** (spread limits in prompt, not hard-coded)
+
+### 7.5 Spread Limits by Session (Prompt-Based)
+
+These are communicated to the LLM via the system prompt and context builder, but not hard-enforced at execution:
 
 ```python
 SPREAD_LIMITS = {
@@ -938,12 +994,12 @@ async def _start_backtest(self):
         symbol=self.symbol
     )
 
-    # Start replay with callback
+    # Start replay with callback (uses CLI --start-time / --end-time)
     await self.connector.start_replay(
         speed=self.backtest_speed,
         on_state_update=self._on_backtest_state,
-        start_time="09:30:00",
-        end_time="16:00:00"
+        start_time=self.start_time,    # Default: "09:30:00"
+        end_time=self.end_time          # Default: "16:00:00"
     )
 ```
 
@@ -971,26 +1027,37 @@ async def _start_live(self):
 
 ```python
 async def _on_state_update(self, state):
-    # 1. Update executor with current price
+    # 1. Track price history for LLM context (with key level labels)
+    from brain.context import record_price
+    label = None
+    if abs(last_price - hod) < 0.05:
+        label = "HOD test"
+    elif abs(last_price - lod) < 0.05:
+        label = "LOD test"
+    elif abs(last_price - vwap) < 0.05:
+        label = "VWAP test"
+    record_price(last_price, price_time, label)
+
+    # 2. Update executor with current price (checks stop/target fills)
     last_price = state["MARKET_STATE"]["LAST"]
     self.executor.update(last_price, timestamp)
 
-    # 2. Get account state from executor
+    # 3. Get account state from executor
     account_state = self.executor.get_account_state()
 
-    # 3. Check daily loss limit
+    # 4. Check daily loss limit
     if account_state["DAILY_PL"] <= self.risk_limits.max_daily_loss:
         self.running = False
         return
 
-    # 4. Merge account into state
+    # 5. Merge account into state
     state["ACCOUNT_STATE"] = account_state
     state["ACTIVE_ORDERS"] = self.executor.get_active_orders()
 
-    # 5. Brain makes decision
+    # 6. Brain makes decision (LLM call with full context)
     command = self.brain.think(state)
 
-    # 6. Execute command
+    # 7. Execute command
     spread = state["MARKET_STATE"]["SPREAD"]
     context = state["MARKET_STATE"]
     result = self.executor.execute(command, current_spread=spread, context=context)
@@ -1037,17 +1104,23 @@ async def _on_state_update(self, state):
 
 - [x] System prompt (v3.0.0)
 - [x] Tool definitions (6 tools)
-- [x] Context builder
+- [x] Context builder (shared instance with price history)
 - [x] Decision history tracking
-- [x] Validation framework
-- [x] GrokProvider
+- [x] Validation framework (exists but DISABLED)
+- [x] GrokProvider (xAI)
+- [x] GroqProvider (Llama 3.3 70B via Groq)
 - [ ] OpenAI/Claude providers (optional)
+- [x] Session-based LLM logging (one file per backtest)
+- [x] Price history tracking with key level labels
 
 ### 10.4 Integration
 
 - [x] main.py mode-based initialization
 - [x] State merging (market + account + orders)
 - [x] Backtest reporter integration
+- [x] CLI --start-time / --end-time for backtest windows
+- [x] CLI --provider / --model for LLM selection
+- [x] .env file support (load_dotenv)
 - [ ] End-to-end integration tests
 - [ ] Performance benchmarks
 
@@ -1057,13 +1130,19 @@ async def _on_state_update(self, state):
 
 ```
 FSDTrader/
+├── .env                              # API keys (GROQ_API_KEY, XAI_API_KEY, etc.)
+├── .gitattributes                    # Git LFS tracking rules
+│
 ├── requirements/
-│   └── FSDTRADER_REQUIREMENTS.md    # This document
+│   └── FSDTRADER_REQUIREMENTS.md     # This document
+│
+├── docs/
+│   └── L2_DATA_PROCESSING.md        # L2 data flow documentation
 │
 ├── src/
-│   ├── main.py                      # Orchestrator
+│   ├── main.py                       # Orchestrator (CLI, backtest/live loops)
 │   │
-│   ├── market_data.py               # Analysis components
+│   ├── market_data.py                # Analysis components
 │   │   ├── OrderBook
 │   │   ├── TapeStream
 │   │   ├── FootprintTracker
@@ -1073,37 +1152,44 @@ FSDTrader/
 │   │   ├── MarketMetrics
 │   │   └── IBKRConnector
 │   │
-│   ├── data_replay.py               # MBO replay
+│   ├── data_replay.py                # MBO replay
 │   │   └── MBOReplayConnector
+│   │
+│   ├── reporting.py                  # BacktestReporter
 │   │
 │   ├── brain/
 │   │   ├── __init__.py
-│   │   ├── brain.py                 # TradingBrain
-│   │   ├── prompts.py               # System prompt
-│   │   ├── tools.py                 # Tool definitions
-│   │   ├── types.py                 # ToolCall, Decision, etc.
-│   │   ├── context.py               # Context builder
-│   │   ├── validation.py            # Pre-flight checks
+│   │   ├── brain.py                  # TradingBrain (session logging)
+│   │   ├── prompts.py                # System prompt
+│   │   ├── tools.py                  # Tool definitions
+│   │   ├── types.py                  # ToolCall, Decision, etc.
+│   │   ├── context.py                # Context builder (shared instance, price history)
+│   │   ├── validation.py             # Pre-flight checks (DISABLED)
 │   │   └── providers/
-│   │       ├── base.py              # LLMProvider ABC
-│   │       └── grok.py              # xAI Grok
+│   │       ├── __init__.py           # Provider factory
+│   │       ├── base.py               # LLMProvider ABC
+│   │       ├── grok.py               # xAI Grok provider
+│   │       └── groq.py               # Groq provider (Llama 3.3 70B)
 │   │
-│   ├── execution/
-│   │   ├── __init__.py              # Factory + exports
-│   │   ├── base.py                  # ExecutionProvider ABC
-│   │   ├── types.py                 # Position, BracketOrder, etc.
-│   │   ├── simulated.py             # SimulatedExecutor
-│   │   └── ibkr.py                  # IBKRExecutor
-│   │
-│   └── reporting/
-│       └── backtest.py              # BacktestReporter
+│   └── execution/
+│       ├── __init__.py               # Factory + exports
+│       ├── base.py                   # ExecutionProvider ABC
+│       ├── types.py                  # Position, BracketOrder, RiskLimits
+│       ├── simulated.py              # SimulatedExecutor (validation DISABLED)
+│       └── ibkr.py                   # IBKRExecutor (validation DISABLED)
+│
+├── data/
+│   └── logs/
+│       └── llm_contexts/             # Session log files
+│           └── session_YYYYMMDD_HHMMSS.txt
 │
 ├── tests/
-│   └── test_execution.py            # 69 unit tests
+│   └── test_execution.py             # 69 unit tests
 │
-└── BacktestData/
-    └── TSLA-L3DATA/                 # Databento MBO files
-        └── xnas-itch-YYYYMMDD.mbo.dbn.zst
+└── BacktestData/                     # Git LFS tracked
+    └── TSLA-L3DATA/                  # Databento MBO files (~2.7GB)
+        ├── xnas-itch-YYYYMMDD.mbo.dbn.zst
+        └── TSLA_MBO_Data_Documentation.md
 ```
 
 ---
@@ -1153,17 +1239,26 @@ TradeRecord(
 
 ### D. Environment Variables
 
+Stored in `.env` file (loaded via `python-dotenv`):
+
 ```bash
-XAI_API_KEY=xai-xxxx      # Grok API key
-OPENAI_API_KEY=sk-xxxx    # OpenAI API key (optional)
-IBKR_PORT=7497            # TWS port (7497=paper, 7496=live)
+XAI_API_KEY=xai-xxxx        # Grok API key (xAI)
+GROQ_API_KEY=gsk_xxxx       # Groq API key
+OPENAI_API_KEY=sk-xxxx      # OpenAI API key (optional)
+IBKR_PORT=7497              # TWS port (7497=paper, 7496=live)
 ```
 
 ### E. CLI Usage
 
 ```bash
-# Backtest mode
+# Backtest mode (full day)
 python main.py --backtest --date 20251023 --speed 100
+
+# Backtest with time window (30 minutes)
+python main.py --backtest --start-time 09:30:00 --end-time 10:00:00
+
+# Backtest with specific provider and model
+python main.py --backtest --provider groq --model llama-3.3-70b-versatile
 
 # Simulation mode
 python main.py --sim
@@ -1175,6 +1270,21 @@ python main.py --paper
 python main.py --live
 ```
 
+**CLI Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--symbol` | `TSLA` | Trading symbol |
+| `--backtest` | - | Backtest with MBO replay |
+| `--sim` | - | Simulation with mock data |
+| `--live` | - | Live trading (DANGER!) |
+| `--date` | latest file | Backtest date (YYYYMMDD) |
+| `--speed` | `100.0` | Backtest speed multiplier |
+| `--start-time` | `09:30:00` | Backtest start time (HH:MM:SS) |
+| `--end-time` | `16:00:00` | Backtest end time (HH:MM:SS) |
+| `--provider` | `grok` | LLM provider (grok, groq, openai) |
+| `--model` | provider default | LLM model override |
+
 ---
 
 ## Document History
@@ -1183,6 +1293,7 @@ python main.py --live
 |---------|------|---------|
 | 1.0.0 | 2025-01-24 | Initial DATA_LAYER.md |
 | 2.0.0 | 2025-01-24 | Comprehensive requirements combining all modules |
+| 3.0.0 | 2026-01-26 | Disabled brain & execution validation (LLM-driven risk management), added Groq provider, session-based LLM logging, shared ContextBuilder with price history, CLI time args, .env support, L2 data processing docs |
 
 ---
 

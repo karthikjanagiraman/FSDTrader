@@ -106,17 +106,12 @@ class IBKRExecutor(ExecutionProvider):
         if not self._position.is_flat():
             return OrderResult(success=False, error="ALREADY_IN_POSITION")
 
-        # Validate size
-        if size > self.risk_limits.max_position_size:
-            return OrderResult(
-                success=False,
-                error=f"SIZE_EXCEEDS_LIMIT: {size} > {self.risk_limits.max_position_size}"
-            )
-
-        # Validate stop distance
-        stop_error = self.risk_limits.validate_stop_distance(limit_price, stop_loss, side)
-        if stop_error:
-            return OrderResult(success=False, error=stop_error)
+        # Note: Validation disabled - letting the LLM handle risk management
+        # The LLM has full context and decides what's appropriate for the trade
+        #
+        # Previously validated:
+        # - Size vs max_position_size
+        # - Stop distance (min/max)
 
         try:
             # Parent order (entry)

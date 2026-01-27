@@ -15,7 +15,7 @@ from datetime import datetime
 from .types import ToolCall, Decision, LLMResponse, ValidationResult, DecisionLog
 from .tools import TOOLS, TOOL_WAIT, is_valid_tool
 from .prompts import get_system_prompt
-from .context import ContextBuilder
+from .context import ContextBuilder, get_context_builder
 from .validation import validate_tool_call
 from .providers import get_provider, LLMProvider
 
@@ -72,8 +72,8 @@ class TradingBrain:
         self._temperature = temperature
         self._max_tokens = max_tokens
 
-        # Components
-        self._context_builder = ContextBuilder()
+        # Components - use module-level context builder for price history sharing
+        self._context_builder = get_context_builder()
         self._system_prompt = get_system_prompt()
 
         # State
@@ -81,11 +81,26 @@ class TradingBrain:
         self._total_calls = 0
         self._total_latency_ms = 0.0
 
-        # LLM context logging
+        # LLM context logging - one file per session
         self._log_contexts = True
         self._context_log_dir = "data/logs/llm_contexts"
+        self._context_log_file: Optional[str] = None
         if self._log_contexts:
             os.makedirs(self._context_log_dir, exist_ok=True)
+            # Create session log file
+            session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._context_log_file = os.path.join(
+                self._context_log_dir,
+                f"session_{session_timestamp}.txt"
+            )
+            # Write session header
+            with open(self._context_log_file, "w") as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"FSDTrader LLM Session Log\n")
+                f.write(f"Started: {session_timestamp}\n")
+                f.write(f"Provider: {provider}\n")
+                f.write(f"Model: {self._provider.model_name}\n")
+                f.write("=" * 80 + "\n\n")
 
         logger.info(
             f"TradingBrain initialized: provider={provider}, "
@@ -305,28 +320,29 @@ class TradingBrain:
         """
         Log the full LLM context and response for debugging.
 
-        Creates a file per call with:
-        - System prompt
-        - User message (context)
+        Appends to the session log file with:
+        - Call number and timestamp
+        - User message (context) - system prompt only on first call
         - LLM response (tool call)
         - Usage stats
         """
+        if not self._context_log_file:
+            return
+
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             call_num = self._total_calls
-            filename = f"call_{call_num:04d}_{timestamp}.txt"
-            filepath = os.path.join(self._context_log_dir, filename)
 
-            with open(filepath, "w") as f:
-                f.write("=" * 80 + "\n")
-                f.write(f"LLM CALL #{call_num} - {timestamp}\n")
-                f.write(f"Provider: {self._provider.provider_name}\n")
-                f.write(f"Model: {self._provider.model_name}\n")
+            with open(self._context_log_file, "a") as f:
+                f.write("\n" + "=" * 80 + "\n")
+                f.write(f"CALL #{call_num} - {timestamp}\n")
                 f.write("=" * 80 + "\n\n")
 
-                f.write("## SYSTEM PROMPT\n")
-                f.write("-" * 40 + "\n")
-                f.write(self._system_prompt + "\n\n")
+                # Only write system prompt on first call
+                if call_num == 1:
+                    f.write("## SYSTEM PROMPT\n")
+                    f.write("-" * 40 + "\n")
+                    f.write(self._system_prompt + "\n\n")
 
                 f.write("## USER MESSAGE (CONTEXT)\n")
                 f.write("-" * 40 + "\n")
@@ -346,7 +362,7 @@ class TradingBrain:
                 f.write(f"Completion tokens: {response.usage.get('completion_tokens', 0)}\n")
                 f.write(f"Total tokens: {response.usage.get('total_tokens', 0)}\n")
 
-            logger.debug(f"Logged LLM context to {filepath}")
+            logger.debug(f"Logged LLM call #{call_num} to session log")
 
         except Exception as e:
             logger.warning(f"Failed to log LLM context: {e}")

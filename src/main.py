@@ -43,6 +43,7 @@ load_dotenv()
 # Local imports
 from market_data import IBKRConnector
 from brain import TradingBrain
+from brain.context import record_price, clear_price_history
 from execution import SimulatedExecutor, IBKRExecutor, RiskLimits
 from reporting import BacktestReporter
 
@@ -210,6 +211,26 @@ class FSDTrader:
             # Skip if no price data yet
             if last_price == 0:
                 return
+
+            # Track price history for context with labels for key levels
+            from datetime import datetime
+            market = state.get("MARKET_STATE", {})
+            price_time = datetime.fromtimestamp(sim_time) if sim_time > 0 else datetime.now()
+
+            # Determine label based on key level proximity
+            label = None
+            hod = market.get("HOD", 0)
+            lod = market.get("LOD", float('inf'))
+            vwap = market.get("VWAP", 0)
+
+            if hod > 0 and abs(last_price - hod) < 0.05:
+                label = "HOD test"
+            elif lod < float('inf') and abs(last_price - lod) < 0.05:
+                label = "LOD test"
+            elif vwap > 0 and abs(last_price - vwap) < 0.05:
+                label = "VWAP test"
+
+            record_price(last_price, price_time, label)
 
             # Update executor with current price (checks for stop/target fills)
             self.executor.update(last_price, sim_time)
