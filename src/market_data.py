@@ -19,10 +19,14 @@ from typing import Optional, List, Dict, Any
 import time
 
 try:
-    from ib_insync import IB, Stock, util
+    from ib_insync import IB, Stock, Crypto, util
 except ImportError:
     IB = None
     Stock = None
+    Crypto = None
+
+# Known crypto symbols for contract type detection
+CRYPTO_SYMBOLS = {"BTC", "ETH", "LTC", "BCH"}
 
 import numpy as np
 
@@ -34,7 +38,7 @@ import numpy as np
 class Trade:
     """Single trade from tape."""
     price: float
-    size: int
+    size: float  # Float for crypto fractional sizes
     time: float  # Unix timestamp (simulated or real)
     side: str    # "BUY" or "SELL"
 
@@ -45,13 +49,13 @@ class FootprintBar:
     high: float = 0.0
     low: float = float('inf')
     close: float = 0.0
-    volume: int = 0
-    buy_volume: int = 0
-    sell_volume: int = 0
-    delta: int = 0          # buy_volume - sell_volume
+    volume: float = 0.0  # Float for crypto
+    buy_volume: float = 0.0  # Float for crypto
+    sell_volume: float = 0.0  # Float for crypto
+    delta: float = 0.0  # buy_volume - sell_volume (float for crypto)
     delta_pct: float = 0.0  # delta / volume * 100
     poc: float = 0.0        # Price with most volume
-    volume_at_price: Dict[float, int] = field(default_factory=dict)
+    volume_at_price: Dict[float, float] = field(default_factory=dict)  # Float for crypto
     imbalances: List[Dict] = field(default_factory=list)
 
 @dataclass
@@ -59,15 +63,16 @@ class DOMWall:
     """Significant order in the book."""
     side: str      # "BID" or "ASK"
     price: float
-    size: int
-    tier: str      # "MAJOR" (>5x avg) or "MINOR" (>3x avg)
+    size: float    # Float for crypto fractional sizes
+    tier: str      # "MASSIVE" (>p95), "MAJOR" (>p90), or "MINOR" (>p75)
     distance_pct: float
+    percentile: float = 0.0  # Which percentile this size is at
 
 @dataclass
 class LargePrint:
     """Large trade from tape."""
     price: float
-    size: int
+    size: float  # Float for crypto fractional sizes
     side: str
     secs_ago: float
 
@@ -77,38 +82,105 @@ class LargePrint:
 
 class OrderBook:
     """
-    Real-time Level 2 Order Book with Wall Detection.
+    Real-time Level 2 Order Book with Smart Wall Detection.
+
+    Key features:
+    - Cumulative sizes at each price level (aggregates multiple market makers)
+    - Percentile-based wall detection (adapts to current market conditions)
+    - Dynamic stack depth (shows levels up to first major wall)
+    - Full-book imbalance calculation
     """
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.bids: Dict[float, int] = {}  # Price -> Size
+        self.bids: Dict[float, int] = {}  # Price -> Cumulative Size
         self.asks: Dict[float, int] = {}
         self.logger = logging.getLogger(f"DOM_{ticker}")
-        
+
+        # Cache for percentile thresholds (recalculated on each update)
+        self._p75: float = 0
+        self._p90: float = 0
+        self._p95: float = 0
+
     def update(self, dom_event):
-        """Handle IBKR updateMktDepth event."""
+        """Handle IBKR updateMktDepth event (legacy incremental)."""
         target = self.bids if dom_event.side == 1 else self.asks
         price = round(dom_event.price, 2)
         size = dom_event.size
         op = dom_event.operation
-        
+
         if op in (0, 1):  # Insert or Update
             target[price] = size
         elif op == 2:     # Delete
             target.pop(price, None)
-    
+
+        self._update_percentiles()
+
+    def update_from_dom_levels(self, dom_bids, dom_asks):
+        """
+        Update book from Ticker.domBids / Ticker.domAsks snapshots.
+        Each is a list of DOMLevel(price, size, marketMaker).
+
+        IMPORTANT: Multiple market makers can have orders at the same price.
+        We ACCUMULATE sizes to show total liquidity at each level.
+        This matches industry standard (what traders see on screens).
+        """
+        self.bids.clear()
+        self.asks.clear()
+
+        # Accumulate sizes from multiple market makers at same price
+        # Use float for crypto fractional sizes, keep as-is for stocks
+        for level in (dom_bids or []):
+            price = round(level.price, 2)
+            self.bids[price] = self.bids.get(price, 0) + level.size
+        for level in (dom_asks or []):
+            price = round(level.price, 2)
+            self.asks[price] = self.asks.get(price, 0) + level.size
+
+        self._update_percentiles()
+
+    def _update_percentiles(self):
+        """Calculate percentile thresholds for smart wall detection."""
+        all_sizes = list(self.bids.values()) + list(self.asks.values())
+        if len(all_sizes) < 5:
+            self._p75 = self._p90 = self._p95 = 0
+            return
+
+        self._p75 = float(np.percentile(all_sizes, 75))
+        self._p90 = float(np.percentile(all_sizes, 90))
+        self._p95 = float(np.percentile(all_sizes, 95))
+
+    def _get_wall_tier(self, size: float) -> Optional[str]:
+        """Determine wall tier based on percentile thresholds."""
+        if self._p95 > 0 and size >= self._p95:
+            return "MASSIVE"
+        elif self._p90 > 0 and size >= self._p90:
+            return "MAJOR"
+        elif self._p75 > 0 and size >= self._p75:
+            return "MINOR"
+        return None
+
+    def _get_size_percentile(self, size: float) -> float:
+        """Get approximate percentile for a size value."""
+        all_sizes = list(self.bids.values()) + list(self.asks.values())
+        if not all_sizes:
+            return 0.0
+        below = sum(1 for s in all_sizes if s < size)
+        return round(below / len(all_sizes) * 100, 1)
+
     def get_imbalance(self) -> float:
-        """Calculate bid/ask volume ratio."""
-        sorted_bids = sorted(self.bids.items(), reverse=True)[:5]
-        sorted_asks = sorted(self.asks.items())[:5]
-        
-        bid_vol = sum(s for _, s in sorted_bids)
-        ask_vol = sum(s for _, s in sorted_asks)
-        
+        """
+        Calculate bid/ask volume ratio using ALL levels.
+
+        This gives a complete picture of order book pressure,
+        not just the top few levels.
+        """
+        bid_vol = sum(self.bids.values())
+        ask_vol = sum(self.asks.values())
+
         if ask_vol == 0:
             return 10.0 if bid_vol > 0 else 1.0
         return round(bid_vol / ask_vol, 2)
-    
+
     def get_spread(self) -> float:
         """Get current spread."""
         if not self.bids or not self.asks:
@@ -116,38 +188,95 @@ class OrderBook:
         best_bid = max(self.bids.keys())
         best_ask = min(self.asks.keys())
         return round(best_ask - best_bid, 2)
-    
-    def get_walls(self, last_price: float, threshold_minor: float = 3.0, 
-                  threshold_major: float = 5.0) -> List[DOMWall]:
-        """Detect significant orders (walls)."""
+
+    def get_walls(self, last_price: float) -> List[DOMWall]:
+        """
+        Detect significant orders (walls) using percentile-based thresholds.
+
+        Tiers:
+        - MASSIVE: >= 95th percentile (very rare, significant barrier)
+        - MAJOR: >= 90th percentile (notable resistance/support)
+        - MINOR: >= 75th percentile (worth noting)
+
+        Returns walls sorted by distance from current price, max 10.
+        """
         walls = []
-        all_sizes = list(self.bids.values()) + list(self.asks.values())
-        if not all_sizes:
+
+        if self._p75 == 0:
             return walls
-        avg_size = np.mean(all_sizes)
-        
+
         for price, size in self.bids.items():
-            ratio = size / avg_size if avg_size > 0 else 0
-            if ratio >= threshold_minor:
-                tier = "MAJOR" if ratio >= threshold_major else "MINOR"
+            tier = self._get_wall_tier(size)
+            if tier:
                 dist = abs(price - last_price) / last_price * 100
-                walls.append(DOMWall("BID", price, size, tier, round(dist, 2)))
-                
+                pct = self._get_size_percentile(size)
+                walls.append(DOMWall("BID", price, size, tier, round(dist, 2), pct))
+
         for price, size in self.asks.items():
-            ratio = size / avg_size if avg_size > 0 else 0
-            if ratio >= threshold_minor:
-                tier = "MAJOR" if ratio >= threshold_major else "MINOR"
+            tier = self._get_wall_tier(size)
+            if tier:
                 dist = abs(price - last_price) / last_price * 100
-                walls.append(DOMWall("ASK", price, size, tier, round(dist, 2)))
-        
-        return sorted(walls, key=lambda w: w.distance_pct)[:5]
-    
-    def get_stack(self, side: str, levels: int = 3) -> List[List]:
-        """Get top N levels for a side."""
+                pct = self._get_size_percentile(size)
+                walls.append(DOMWall("ASK", price, size, tier, round(dist, 2), pct))
+
+        # Sort by distance and return max 10
+        return sorted(walls, key=lambda w: w.distance_pct)[:10]
+
+    def get_stack(self, side: str, levels: int = 10) -> List[List]:
+        """Get top N levels for a side (default 10 for more context)."""
         book = self.bids if side == "BID" else self.asks
         reverse = side == "BID"
         sorted_levels = sorted(book.items(), reverse=reverse)[:levels]
         return [[p, s] for p, s in sorted_levels]
+
+    def get_stack_to_wall(self, side: str, max_levels: int = 15) -> List[Dict]:
+        """
+        Get all levels from best price UP TO first major/massive wall.
+
+        This gives the LLM context on immediate liquidity AND where
+        the first significant barrier is located.
+
+        Returns list of dicts with price, size, cumulative_size, and wall_tier.
+        """
+        book = self.bids if side == "BID" else self.asks
+        reverse = side == "BID"
+        sorted_levels = sorted(book.items(), reverse=reverse)
+
+        stack = []
+        cumulative = 0
+        for price, size in sorted_levels:
+            cumulative += size
+            tier = self._get_wall_tier(size)
+            stack.append({
+                "price": price,
+                "size": size,
+                "cumulative_size": cumulative,
+                "wall_tier": tier  # None, "MINOR", "MAJOR", or "MASSIVE"
+            })
+
+            # Stop at first MAJOR or MASSIVE wall
+            if tier in ("MAJOR", "MASSIVE"):
+                break
+
+            # Safety cap
+            if len(stack) >= max_levels:
+                break
+
+        return stack
+
+    def get_book_stats(self) -> Dict[str, Any]:
+        """Get summary statistics about the order book."""
+        all_sizes = list(self.bids.values()) + list(self.asks.values())
+        return {
+            "bid_levels": len(self.bids),
+            "ask_levels": len(self.asks),
+            "total_bid_volume": sum(self.bids.values()),
+            "total_ask_volume": sum(self.asks.values()),
+            "p75_threshold": self._p75,
+            "p90_threshold": self._p90,
+            "p95_threshold": self._p95,
+            "avg_size": float(np.mean(all_sizes)) if all_sizes else 0,
+        }
 
 # =============================================================================
 # TAPE STREAM (Time & Sales)
@@ -266,8 +395,8 @@ class FootprintTracker:
         self.recent_bars: deque = deque(maxlen=20)
         self.logger = logging.getLogger(f"FOOTPRINT_{ticker}")
     
-    def on_trade(self, price: float, size: int, side: str, timestamp: float = None):
-        """Process trade into footprint."""
+    def on_trade(self, price: float, size: float, side: str, timestamp: float = None):
+        """Process trade into footprint. Size can be float for crypto."""
         now = timestamp if timestamp else time.time()
         
         # Check for new bar
@@ -355,13 +484,13 @@ class CumulativeDelta:
     """
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.session_delta: int = 0
+        self.session_delta: float = 0.0  # Float for crypto fractional sizes
         self.delta_history: deque = deque(maxlen=300)  # 5 min at 1sec granularity
         self.last_update: float = 0
         self.logger = logging.getLogger(f"CVD_{ticker}")
     
-    def add_trade(self, size: int, side: str, timestamp: float = None):
-        """Accumulate delta from trade."""
+    def add_trade(self, size: float, side: str, timestamp: float = None):
+        """Accumulate delta from trade. Size can be float for crypto."""
         delta = size if side == "BUY" else -size
         self.session_delta += delta
         
@@ -422,12 +551,12 @@ class VolumeProfile:
     def __init__(self, ticker: str, tick_size: float = 0.01):
         self.ticker = ticker
         self.tick_size = tick_size
-        self.volume_at_price: Dict[float, int] = defaultdict(int)
-        self.total_volume: int = 0
+        self.volume_at_price: Dict[float, float] = defaultdict(float)  # Float for crypto
+        self.total_volume: float = 0.0  # Float for crypto fractional sizes
         self.logger = logging.getLogger(f"VP_{ticker}")
     
-    def add_trade(self, price: float, size: int):
-        """Add volume to profile."""
+    def add_trade(self, price: float, size: float):
+        """Add volume to profile. Size can be float for crypto."""
         rounded = round(price / self.tick_size) * self.tick_size
         rounded = round(rounded, 2)
         self.volume_at_price[rounded] += size
@@ -492,8 +621,8 @@ class AbsorptionDetector:
         self.recent_trades: deque = deque(maxlen=window_size)
         self.logger = logging.getLogger(f"ABSORB_{ticker}")
     
-    def on_trade(self, price: float, size: int, side: str, timestamp: float = None):
-        """Track trades for absorption detection."""
+    def on_trade(self, price: float, size: float, side: str, timestamp: float = None):
+        """Track trades for absorption detection. Size can be float for crypto."""
         self.recent_trades.append({
             "price": price,
             "size": size,
@@ -554,7 +683,7 @@ class MarketMetrics:
         self.last_price: float = 0.0
         self.vwap: float = 0.0
         self.total_value: float = 0.0
-        self.session_volume: int = 0
+        self.session_volume: float = 0.0  # Float for crypto fractional sizes
         self.avg_volume_30d: int = 10_000_000  # Default, should be fetched
         self.session_start: float = 0
         self.logger = logging.getLogger(f"METRICS_{ticker}")
@@ -570,27 +699,35 @@ class MarketMetrics:
         if self.session_start == 0 and timestamp:
             self.session_start = timestamp
             
-    def add_trade(self, price: float, size: int, timestamp: float = None):
-        """Update VWAP and Volume from trade."""
+    def add_trade(self, price: float, size: float, timestamp: float = None):
+        """Update VWAP and Volume from trade. Size can be float for crypto."""
         self.update_price(price, timestamp)
-        
+
         self.session_volume += size
         self.total_value += price * size
-        
+
         if self.session_volume > 0:
             self.vwap = round(self.total_value / self.session_volume, 2)
     
     def update_from_snapshot(self, ticker_obj):
-        """Update from IBKR ticker snapshot."""
-        if hasattr(ticker_obj, 'high') and ticker_obj.high:
-            self.hod = ticker_obj.high
-        if hasattr(ticker_obj, 'low') and ticker_obj.low:
-            self.lod = ticker_obj.low
+        """Update from IBKR ticker snapshot.
+
+        NOTE: We intentionally do NOT use ticker_obj.high/low here because
+        IBKR provides 24-hour high/low, not intraday session high/low.
+        HOD/LOD are tracked from actual trades via update_price() instead.
+        """
+        import math
+
+        # Skip IBKR's high/low - they're 24h values, not intraday
+        # HOD/LOD are tracked from trades in update_price()
+
         if hasattr(ticker_obj, 'last') and ticker_obj.last:
-            self.last_price = ticker_obj.last
-        if hasattr(ticker_obj, 'volume') and ticker_obj.volume:
+            # Update price (this also updates HOD/LOD from actual trades)
+            self.update_price(ticker_obj.last)
+        # Only use IBKR's volume/vwap if valid (not nan) - crypto often has nan values
+        if hasattr(ticker_obj, 'volume') and ticker_obj.volume and not math.isnan(ticker_obj.volume):
             self.session_volume = ticker_obj.volume
-        if hasattr(ticker_obj, 'vwap') and ticker_obj.vwap:
+        if hasattr(ticker_obj, 'vwap') and ticker_obj.vwap and not math.isnan(ticker_obj.vwap):
             self.vwap = ticker_obj.vwap
     
     def get_hod_lod_location(self) -> str:
@@ -672,7 +809,7 @@ class IBKRConnector:
     """
     Main connector that orchestrates all data sources.
     """
-    def __init__(self, host: str = '127.0.0.1', port: int = 7497, client_id: int = 1):
+    def __init__(self, host: str = '127.0.0.1', port: int = 7497, client_id: int = 10):
         self.ib = IB() if IB else None
         self.host = host
         self.port = port
@@ -686,7 +823,10 @@ class IBKRConnector:
         self.profiles: Dict[str, VolumeProfile] = {}
         self.absorbers: Dict[str, AbsorptionDetector] = {}
         self.metrics: Dict[str, MarketMetrics] = {}
-        
+
+        # Track last seen price/size for fallback trade detection (crypto)
+        self._last_seen: Dict[str, tuple] = {}  # symbol -> (price, size)
+
         self.logger = logging.getLogger("IBKR_CONN")
     
     async def connect(self):
@@ -703,14 +843,19 @@ class IBKRConnector:
             self.logger.error(f"Connection failed: {e}")
             raise
     
-    def subscribe_market_data(self, symbol: str):
+    async def subscribe_market_data(self, symbol: str):
         """Subscribe to all data feeds for a symbol."""
         if not self.ib:
             return
-        
-        contract = Stock(symbol, 'SMART', 'USD')
-        self.ib.qualifyContracts(contract)
-        
+
+        # Determine contract type based on symbol
+        if symbol.upper() in CRYPTO_SYMBOLS:
+            contract = Crypto(symbol, 'ZEROHASH', 'USD')
+            self.logger.info(f"Using Crypto contract for {symbol} (ZEROHASH)")
+        else:
+            contract = Stock(symbol, 'SMART', 'USD')
+        await self.ib.qualifyContractsAsync(contract)
+
         # Initialize all components
         self.books[symbol] = OrderBook(symbol)
         self.tapes[symbol] = TapeStream(symbol)
@@ -719,66 +864,86 @@ class IBKRConnector:
         self.profiles[symbol] = VolumeProfile(symbol)
         self.absorbers[symbol] = AbsorptionDetector(symbol)
         self.metrics[symbol] = MarketMetrics(symbol)
-        
+
         # Subscribe to data feeds
-        self.ib.reqMktDepth(contract, numRows=20, isSmartDepth=True)
+        # reqMktDepth -> DOM data arrives on Ticker.domBids / Ticker.domAsks
+        # Request 50 levels for deeper book analysis and better wall detection
+        self.ib.reqMktDepth(contract, numRows=50, isSmartDepth=True)
+        # reqTickByTickData -> trade ticks arrive on Ticker.tickByTicks
         self.ib.reqTickByTickData(contract, 'AllLast', 0, False)
-        self.ib.reqMktData(contract, '', False, False)
-        
-        # Hook events
-        self.ib.updateMktDepthEvent += self._on_depth
-        self.ib.tickByTickAllLastEvent += self._on_tick
-        self.ib.pendingTickersEvent += self._on_snapshot
-        
+        # reqMktData -> snapshot data (bid/ask/last/vwap) on Ticker
+        # Generic tick types: 233=VWAP, 165=Misc Stats (avg volume)
+        self.ib.reqMktData(contract, '233', False, False)
+
+        # ib_insync 0.9.86: all updates come through pendingTickersEvent
+        # (no separate updateMktDepthEvent or tickByTickAllLastEvent)
+        self.ib.pendingTickersEvent += self._on_ticker_update
+
         self.logger.info(f"Subscribed to {symbol}")
     
-    def _on_depth(self, item):
-        """Handle DOM update."""
-        symbol = item.contract.symbol
-        if symbol in self.books:
-            self.books[symbol].update(item)
-    
-    def _on_tick(self, ticker, tick):
-        """Handle trade tick - feeds all analyzers."""
-        symbol = ticker.contract.symbol
-        
-        if symbol not in self.tapes:
-            return
-        
-        # Update quote for side detection
-        if ticker.bid and ticker.ask:
-            self.tapes[symbol].update_quotes(ticker.bid, ticker.ask)
-        
-        # Feed tape
-        self.tapes[symbol].on_tick(tick)
-        
-        # Get trade details
-        price = tick.price
-        size = tick.size
-        
-        # Determine side from tape
-        tape = self.tapes[symbol]
+    def _on_ticker_update(self, tickers):
+        """
+        Unified handler for all ticker updates (ib_insync 0.9.86).
+
+        pendingTickersEvent fires with a set of Ticker objects.
+        Each Ticker carries:
+          - bid/ask/last (market data)
+          - domBids/domAsks (L2 depth from reqMktDepth)
+          - tickByTicks (trade ticks from reqTickByTickData)
+        """
+        for t in tickers:
+            symbol = t.contract.symbol
+
+            # --- Market data snapshot (bid/ask/last/volume) ---
+            if symbol in self.metrics:
+                self.metrics[symbol].update_from_snapshot(t)
+
+            # --- L2 DOM updates ---
+            # domTicks present means depth changed; sync from authoritative domBids/domAsks
+            if symbol in self.books and t.domTicks:
+                self.books[symbol].update_from_dom_levels(t.domBids, t.domAsks)
+
+            # --- Trade ticks ---
+            if symbol in self.tapes:
+                # Update quote for side detection
+                if t.bid and t.ask:
+                    self.tapes[symbol].update_quotes(t.bid, t.ask)
+
+                tape = self.tapes[symbol]
+
+                if t.tickByTicks:
+                    # Primary path: use tick-by-tick data (stocks)
+                    for tick in t.tickByTicks:
+                        tape.on_tick(tick)
+                        self._process_trade(symbol, tick.price, tick.size, tape)
+                elif t.last and t.lastSize:
+                    # Fallback path: use last price/size (crypto via ZEROHASH)
+                    # Only process if price or size changed (indicates new trade)
+                    price = t.last
+                    size = t.lastSize
+                    prev = self._last_seen.get(symbol)
+                    if prev is None or prev != (price, size):
+                        self._last_seen[symbol] = (price, size)
+                        if prev is not None:  # Skip first update (not a trade)
+                            self._process_trade(symbol, price, size, tape)
+
+    def _process_trade(self, symbol: str, price: float, size: float, tape: TapeStream):
+        """Process a trade and feed all analyzers."""
+        # Determine side based on quote
         if price >= tape.last_ask:
             side = "BUY"
         elif price <= tape.last_bid:
             side = "SELL"
         else:
             side = "BUY"  # Default
-        
+
         # Feed all analyzers
         self.footprints[symbol].on_trade(price, size, side)
         self.cvds[symbol].add_trade(size, side)
         self.profiles[symbol].add_trade(price, size)
         self.absorbers[symbol].on_trade(price, size, side)
-        self.metrics[symbol].update_price(price)
-    
-    def _on_snapshot(self, tickers):
-        """Handle market data snapshot."""
-        for t in tickers:
-            symbol = t.contract.symbol
-            if symbol in self.metrics:
-                self.metrics[symbol].update_from_snapshot(t)
-    
+        self.metrics[symbol].add_trade(price, size)
+
     def get_full_state(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Aggregate ALL data sources into the complete LLM context.
@@ -807,16 +972,23 @@ class IBKRConnector:
                 "VWAP": metrics.vwap,
                 "TIME_SESSION": metrics.get_time_session(),
                 
-                # Level 2 (DOM)
+                # Level 2 (DOM) - Smart processing with cumulative sizes
                 "L2_IMBALANCE": book.get_imbalance(),
                 "SPREAD": book.get_spread(),
                 "DOM_WALLS": [
-                    {"side": w.side, "price": w.price, "size": w.size, 
-                     "tier": w.tier, "distance_pct": w.distance_pct}
+                    {"side": w.side, "price": w.price, "size": w.size,
+                     "tier": w.tier, "distance_pct": w.distance_pct,
+                     "percentile": w.percentile}
                     for w in book.get_walls(last_price)
                 ],
-                "BID_STACK": book.get_stack("BID"),
-                "ASK_STACK": book.get_stack("ASK"),
+                # Dynamic stacks - show levels up to first major wall
+                "BID_STACK_TO_WALL": book.get_stack_to_wall("BID"),
+                "ASK_STACK_TO_WALL": book.get_stack_to_wall("ASK"),
+                # Also include simple top-10 for backwards compatibility
+                "BID_STACK": book.get_stack("BID", levels=10),
+                "ASK_STACK": book.get_stack("ASK", levels=10),
+                # Book statistics for context
+                "BOOK_STATS": book.get_book_stats(),
                 
                 # Tape
                 "TAPE_VELOCITY": vel_label,

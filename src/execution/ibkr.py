@@ -10,12 +10,16 @@ import time
 from typing import Dict, Any, List, Optional
 
 try:
-    from ib_insync import IB, Stock, Order, Trade
+    from ib_insync import IB, Stock, Crypto, Order, Trade
 except ImportError:
     IB = None
     Stock = None
+    Crypto = None
     Order = None
     Trade = None
+
+# Known crypto symbols for contract type detection
+CRYPTO_SYMBOLS = {"BTC", "ETH", "LTC", "BCH"}
 
 from .base import ExecutionProvider
 from .types import (
@@ -61,12 +65,16 @@ class IBKRExecutor(ExecutionProvider):
 
         self.ib = ib
         self.symbol = symbol
-        self.contract = Stock(symbol, 'SMART', 'USD')
+        # Determine contract type based on symbol
+        if symbol.upper() in CRYPTO_SYMBOLS:
+            self.contract = Crypto(symbol, 'ZEROHASH', 'USD')
+        else:
+            self.contract = Stock(symbol, 'SMART', 'USD')
         self.risk_limits = risk_limits or RiskLimits()
         self.logger = logging.getLogger(f"IBKR_EXEC_{symbol}")
 
-        # Qualify contract
-        self.ib.qualifyContracts(self.contract)
+        # Contract will be qualified via async init()
+        self._contract_qualified = False
 
         # Position state
         self._position = Position()
@@ -91,6 +99,60 @@ class IBKRExecutor(ExecutionProvider):
         # Hook into IBKR events
         self.ib.orderStatusEvent += self._on_order_status
         self.ib.execDetailsEvent += self._on_execution
+
+    async def init(self):
+        """Async initialization - qualify contract and sync with broker."""
+        await self.ib.qualifyContractsAsync(self.contract)
+        self._contract_qualified = True
+        self.logger.info(f"Contract qualified: {self.contract}")
+        # CRITICAL: Sync position state with broker
+        await self._sync_position_from_broker()
+
+    async def _sync_position_from_broker(self) -> None:
+        """Sync internal position state with actual broker positions.
+
+        This is critical for:
+        - Starting mid-session when positions already exist
+        - Recovering from crashes/disconnects
+        - Ensuring exit orders go the right direction
+        """
+        positions = self.ib.positions()
+        for pos in positions:
+            if pos.contract.symbol == self.symbol:
+                qty = pos.position  # positive=long, negative=short
+                if qty > 0:
+                    self._position = Position(
+                        side=PositionSide.LONG,
+                        size=int(qty),
+                        avg_entry=pos.avgCost,
+                        entry_time=time.time(),
+                    )
+                    self.logger.warning(
+                        f"SYNCED position from broker: LONG {int(qty)} @ ${pos.avgCost:.2f}"
+                    )
+                elif qty < 0:
+                    self._position = Position(
+                        side=PositionSide.SHORT,
+                        size=int(abs(qty)),
+                        avg_entry=pos.avgCost,
+                        entry_time=time.time(),
+                    )
+                    self.logger.warning(
+                        f"SYNCED position from broker: SHORT {int(abs(qty))} @ ${pos.avgCost:.2f}"
+                    )
+                break
+
+    def _get_broker_position(self) -> Optional[Dict[str, Any]]:
+        """Get current position from broker.
+
+        Returns:
+            Dict with 'qty' (positive=long, negative=short) and 'avg_cost',
+            or None if no position.
+        """
+        for pos in self.ib.positions():
+            if pos.contract.symbol == self.symbol:
+                return {'qty': pos.position, 'avg_cost': pos.avgCost}
+        return None
 
     def submit_bracket_order(
         self,
@@ -186,16 +248,18 @@ class IBKRExecutor(ExecutionProvider):
             return OrderResult(success=False, error=str(e))
 
     def modify_stop(self, new_price: float) -> OrderResult:
-        """Modify stop loss order."""
+        """Modify stop loss order, or create one if none exists."""
         if self._position.is_flat():
             return OrderResult(success=False, error="NO_POSITION")
 
+        # No bracket? Create standalone stop (for synced/naked positions)
         if not self._active_bracket:
-            return OrderResult(success=False, error="NO_ACTIVE_BRACKET")
+            return self._create_standalone_stop(new_price)
 
         order_id = self._active_bracket.stop_order_id
         if order_id not in self._pending_orders:
-            return OrderResult(success=False, error="STOP_ORDER_NOT_FOUND")
+            # Bracket exists but stop missing - create new standalone
+            return self._create_standalone_stop(new_price)
 
         try:
             trade = self._pending_orders[order_id]
@@ -212,6 +276,52 @@ class IBKRExecutor(ExecutionProvider):
             )
         except Exception as e:
             self.logger.error(f"Stop modification failed: {e}")
+            return OrderResult(success=False, error=str(e))
+
+    def _create_standalone_stop(self, stop_price: float) -> OrderResult:
+        """Create standalone stop for position without bracket.
+
+        Used for:
+        - Positions synced from broker on startup
+        - Naked positions without existing stops
+        """
+        try:
+            exit_side = "SELL" if self._position.side == PositionSide.LONG else "BUY"
+
+            stop_order = Order()
+            stop_order.orderId = self.ib.client.getReqId()
+            stop_order.action = exit_side
+            stop_order.totalQuantity = self._position.size
+            stop_order.orderType = "STP"
+            stop_order.auxPrice = stop_price
+            stop_order.transmit = True
+
+            trade = self.ib.placeOrder(self.contract, stop_order)
+            self._pending_orders[stop_order.orderId] = trade
+
+            # Create bracket to track stop
+            self._active_bracket = BracketOrder(
+                entry_order_id=0,  # No entry order for synced positions
+                stop_order_id=stop_order.orderId,
+                target_order_id=0,  # No target for now
+                entry_price=self._position.avg_entry,
+                stop_price=stop_price,
+                target_price=0,
+                side="BUY" if self._position.side == PositionSide.LONG else "SELL",
+                quantity=self._position.size,
+                status="FILLED",  # Position already exists
+            )
+
+            self.logger.info(
+                f"Standalone stop created: {exit_side} {self._position.size} STP @ ${stop_price:.2f}"
+            )
+            return OrderResult(
+                success=True,
+                order_id=stop_order.orderId,
+                message=f"Stop created at ${stop_price:.2f}",
+            )
+        except Exception as e:
+            self.logger.error(f"Stop creation failed: {e}")
             return OrderResult(success=False, error=str(e))
 
     def modify_target(self, new_price: float) -> OrderResult:
@@ -244,30 +354,65 @@ class IBKRExecutor(ExecutionProvider):
             return OrderResult(success=False, error=str(e))
 
     def exit_position(self, reason: str = "MANUAL") -> OrderResult:
-        """Exit position at market."""
-        if self._position.is_flat():
-            return OrderResult(success=False, error="NO_POSITION")
+        """Exit position at market with broker validation.
+
+        CRITICAL: Uses broker position (not internal state) to determine
+        exit direction and size. This prevents adding to positions when
+        internal state is out of sync.
+        """
+        # Check BROKER position (not internal state) - this is the source of truth
+        broker_pos = self._get_broker_position()
+
+        if broker_pos is None or broker_pos['qty'] == 0:
+            # No broker position - correct internal state if needed
+            if not self._position.is_flat():
+                self.logger.warning(
+                    "Internal shows position but broker is FLAT. Correcting internal state."
+                )
+                self._position = Position()
+                self._active_bracket = None
+            return OrderResult(success=False, error="NO_BROKER_POSITION")
+
+        # Use BROKER position for exit direction (not internal state!)
+        broker_qty = broker_pos['qty']
+        exit_side = "SELL" if broker_qty > 0 else "BUY"
+        exit_size = int(abs(broker_qty))
+
+        # Log mismatch if detected
+        internal_is_long = self._position.side == PositionSide.LONG
+        broker_is_long = broker_qty > 0
+        if (broker_is_long != internal_is_long) or (exit_size != self._position.size):
+            self.logger.warning(
+                f"Position mismatch! Internal: {self._position.side.value} {self._position.size}, "
+                f"Broker: {'LONG' if broker_is_long else 'SHORT'} {exit_size}. Using BROKER values."
+            )
+            # Correct internal state
+            self._position = Position(
+                side=PositionSide.LONG if broker_is_long else PositionSide.SHORT,
+                size=exit_size,
+                avg_entry=broker_pos['avg_cost'],
+                entry_time=time.time(),
+            )
 
         try:
             # Cancel existing bracket orders
             self._cancel_bracket_orders()
 
-            # Submit market exit order
-            exit_side = "SELL" if self._position.side == PositionSide.LONG else "BUY"
+            # Submit market exit order using BROKER values
             exit_order = Order()
             exit_order.action = exit_side
-            exit_order.totalQuantity = self._position.size
+            exit_order.totalQuantity = exit_size
             exit_order.orderType = "MKT"
 
             trade = self.ib.placeOrder(self.contract, exit_order)
             self._pending_orders[exit_order.orderId] = trade
 
-            self.logger.info(f"Market exit submitted: {exit_side} {self._position.size}")
+            self.logger.info(f"Market exit submitted: {exit_side} {exit_size} (reason: {reason})")
 
             return OrderResult(
                 success=True,
                 order_id=exit_order.orderId,
-                message=f"Market exit order submitted",
+                message=f"Market exit: {exit_side} {exit_size}",
             )
         except Exception as e:
             self.logger.error(f"Exit failed: {e}")

@@ -16,6 +16,31 @@ from .types import Decision
 PriceHistoryEntry = Tuple[datetime, float, Optional[str]]
 
 
+def _fmt_size(val: float, signed: bool = False) -> str:
+    """Format size for display - stocks use commas, crypto uses decimals.
+
+    Args:
+        val: The size value to format
+        signed: If True, always show + or - prefix
+
+    Returns:
+        Formatted string appropriate for the value magnitude
+    """
+    prefix = "+" if signed and val > 0 else ""
+
+    # Whole numbers (stocks): use comma format
+    if val == int(val) and abs(val) >= 1:
+        return f"{prefix}{int(val):,}"
+    elif abs(val) >= 1:
+        # Float >= 1 with fractional part (e.g., 1.5 BTC)
+        return f"{prefix}{val:,.4f}"
+    elif val != 0:
+        # Small fractional values (crypto)
+        return f"{prefix}{val:.8f}"
+    else:
+        return "0"
+
+
 class ContextBuilder:
     """
     Builds comprehensive context for the LLM from raw market state.
@@ -179,7 +204,8 @@ FLAT - Looking for entry opportunity."""
         counter_trend_warning = ""
         # This would be enhanced based on what trade direction the model might consider
 
-        cvd_formatted = f"{cvd_session:+,}" if cvd_session != 0 else "0"
+        # Format CVD using helper
+        cvd_formatted = _fmt_size(cvd_session, signed=True)
 
         return f"""## SESSION CONTEXT
 
@@ -255,7 +281,11 @@ FLAT - Looking for entry opportunity."""
         # Format the price entries (show last 8-12 entries for readability)
         display_entries = history_list[-12:]
         for timestamp, price, label in display_entries:
-            time_str = timestamp.strftime("%H:%M:%S")
+            # Handle both datetime objects and Unix timestamps (float)
+            if isinstance(timestamp, (int, float)):
+                time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+            else:
+                time_str = timestamp.strftime("%H:%M:%S")
 
             # Add context labels
             context_parts = []
@@ -331,61 +361,111 @@ FLAT - Looking for entry opportunity."""
     └── VAL: ${vp_val:.2f}"""
 
     def _build_order_book(self, market_state: Dict[str, Any]) -> str:
-        """Build the order book (Level 2) section."""
+        """
+        Build the order book (Level 2) section.
+
+        Uses smart L2 processing:
+        - Dynamic stacks: Shows levels from best price up to first major wall
+        - Percentile-based walls: MASSIVE (>p95), MAJOR (>p90), MINOR (>p75)
+        - Cumulative sizes: Multiple market makers aggregated at each price
+        """
         mkt = market_state.get("MARKET_STATE", market_state)
 
         l2_imbalance = mkt.get("L2_IMBALANCE", 1.0)
         spread = mkt.get("SPREAD", 0)
-        bid_stack = mkt.get("BID_STACK", [])
-        ask_stack = mkt.get("ASK_STACK", [])
+        book_stats = mkt.get("BOOK_STATS", {})
+
+        # Prefer dynamic stacks (up to major wall), fallback to simple stacks
+        bid_stack = mkt.get("BID_STACK_TO_WALL", mkt.get("BID_STACK", []))
+        ask_stack = mkt.get("ASK_STACK_TO_WALL", mkt.get("ASK_STACK", []))
         walls = mkt.get("DOM_WALLS", [])
 
         # Interpret imbalance
         if l2_imbalance >= 1.5:
-            imbalance_label = "BULLISH - bids > asks"
+            imbalance_label = "BULLISH - strong bid support"
         elif l2_imbalance <= 0.6:
-            imbalance_label = "BEARISH - asks > bids"
+            imbalance_label = "BEARISH - heavy ask pressure"
         else:
             imbalance_label = "NEUTRAL"
 
-        # Format bid stack
+        # Book statistics for context
+        total_bid_vol = book_stats.get("total_bid_volume", 0)
+        total_ask_vol = book_stats.get("total_ask_volume", 0)
+        bid_levels = book_stats.get("bid_levels", 0)
+        ask_levels = book_stats.get("ask_levels", 0)
+
+        # Use module-level helper for size formatting
+        fmt_size = _fmt_size
+
+        # Format bid stack (dynamic depth - up to major wall)
         bid_lines = []
-        for level in bid_stack[:3]:
-            if isinstance(level, (list, tuple)) and len(level) >= 2:
-                bid_lines.append(f"│   ├── ${level[0]:.2f} x {level[1]:,}")
+        for level in bid_stack[:10]:  # Cap at 10 for readability
+            if isinstance(level, dict):
+                price = level.get("price", 0)
+                size = level.get("size", 0)
+                cum_size = level.get("cumulative_size", size)
+                bid_lines.append(f"│   ├── ${price:.2f} x {fmt_size(size)} (cum: {fmt_size(cum_size)})")
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                bid_lines.append(f"│   ├── ${level[0]:.2f} x {fmt_size(level[1])}")
+        if bid_lines:
+            bid_lines[-1] = bid_lines[-1].replace("├──", "└──")  # Last item
         bid_section = "\n".join(bid_lines) if bid_lines else "│   └── (No bids)"
 
-        # Format ask stack
+        # Format ask stack (dynamic depth - up to major wall)
         ask_lines = []
-        for level in ask_stack[:3]:
-            if isinstance(level, (list, tuple)) and len(level) >= 2:
-                ask_lines.append(f"│   ├── ${level[0]:.2f} x {level[1]:,}")
+        for level in ask_stack[:10]:  # Cap at 10 for readability
+            if isinstance(level, dict):
+                price = level.get("price", 0)
+                size = level.get("size", 0)
+                cum_size = level.get("cumulative_size", size)
+                ask_lines.append(f"│   ├── ${price:.2f} x {fmt_size(size)} (cum: {fmt_size(cum_size)})")
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                ask_lines.append(f"│   ├── ${level[0]:.2f} x {fmt_size(level[1])}")
+        if ask_lines:
+            ask_lines[-1] = ask_lines[-1].replace("├──", "└──")  # Last item
         ask_section = "\n".join(ask_lines) if ask_lines else "│   └── (No asks)"
 
-        # Format walls
+        # Format walls with tier indicators
+        # Tier meanings: MASSIVE (>95th pct), MAJOR (>90th pct), MINOR (>75th pct)
         wall_lines = []
-        for wall in walls[:3]:
+        for wall in walls[:5]:  # Show up to 5 most significant walls
             if isinstance(wall, dict):
                 side = wall.get("side", "?")
                 price = wall.get("price", 0)
                 size = wall.get("size", 0)
                 tier = wall.get("tier", "MINOR")
                 dist = wall.get("distance_pct", 0)
-                wall_lines.append(f"    ├── {side} ${price:.2f} x {size:,} ({tier}) - {dist:.2f}% away")
-        wall_section = "\n".join(wall_lines) if wall_lines else "    └── (No significant walls)"
+                pctl = wall.get("percentile", 0)
+
+                # Add visual indicator based on tier
+                tier_icon = "🔴" if tier == "MASSIVE" else "🟠" if tier == "MAJOR" else "🟡"
+                wall_lines.append(
+                    f"    ├── {tier_icon} {side} ${price:.2f} x {fmt_size(size)} "
+                    f"({tier}, p{pctl:.0f}) - {dist:.2f}% away"
+                )
+        if wall_lines:
+            wall_lines[-1] = wall_lines[-1].replace("├──", "└──")  # Last item
+        wall_section = "\n".join(wall_lines) if wall_lines else "    └── (No significant walls detected)"
+
+        # Book depth summary
+        depth_summary = ""
+        if total_bid_vol > 0 or total_ask_vol > 0:
+            depth_summary = f"""│
+├── Book Depth: {bid_levels} bid levels, {ask_levels} ask levels
+├── Total Volume: {fmt_size(total_bid_vol)} bid / {fmt_size(total_ask_vol)} ask"""
 
         return f"""## ORDER BOOK (Level 2)
 
 ├── L2 Imbalance: {l2_imbalance:.1f} ({imbalance_label})
-├── Spread: ${spread:.2f}
+├── Spread: ${spread:.2f}{depth_summary}
 │
-├── Bid Stack:
+├── Bid Stack (to major wall):
 {bid_section}
 │
-├── Ask Stack:
+├── Ask Stack (to major wall):
 {ask_section}
 │
-└── Walls:
+└── Walls (significant liquidity):
 {wall_section}"""
 
     def _build_tape_analysis(self, market_state: Dict[str, Any]) -> str:
@@ -399,7 +479,7 @@ FLAT - Looking for entry opportunity."""
         delta_5s = mkt.get("TAPE_DELTA_5S", 0)
         large_prints = mkt.get("LARGE_PRINTS_1M", [])
 
-        # Format large prints
+        # Format large prints - handle crypto fractional sizes
         print_lines = []
         for lp in large_prints[:3]:
             if isinstance(lp, dict):
@@ -407,8 +487,12 @@ FLAT - Looking for entry opportunity."""
                 price = lp.get("price", 0)
                 size = lp.get("size", 0)
                 secs_ago = lp.get("secs_ago", 0)
-                print_lines.append(f"    └── {side} {size:,} @ ${price:.2f} ({secs_ago:.0f}s ago)")
+                print_lines.append(f"    └── {side} {_fmt_size(size)} @ ${price:.2f} ({secs_ago:.0f}s ago)")
         prints_section = "\n".join(print_lines) if print_lines else "    └── (No large prints)"
+
+        # Format deltas using helper
+        delta_1s_str = _fmt_size(delta_1s, signed=True)
+        delta_5s_str = _fmt_size(delta_5s, signed=True)
 
         return f"""## TAPE ANALYSIS
 
@@ -416,8 +500,8 @@ FLAT - Looking for entry opportunity."""
 ├── Sentiment: {sentiment}
 │
 ├── Delta:
-│   ├── 1-second: {delta_1s:+,}
-│   └── 5-second: {delta_5s:+,}
+│   ├── 1-second: {delta_1s_str}
+│   └── 5-second: {delta_5s_str}
 │
 └── Large Prints (last 60s):
 {prints_section}"""
@@ -442,15 +526,20 @@ FLAT - Looking for entry opportunity."""
             fp_volume = footprint.get("volume", 0)
             fp_poc = footprint.get("poc", 0)
 
+            # Format delta/volume using helper
+            delta_str = _fmt_size(fp_delta, signed=True)
+            vol_str = _fmt_size(fp_volume)
+
             footprint_section = f"""├── Footprint (Current Bar):
 │   ├── OHLC: ${fp_open:.2f} / ${fp_high:.2f} / ${fp_low:.2f} / ${fp_close:.2f}
-│   ├── Delta: {fp_delta:+,} ({fp_delta_pct:+.1f}%)
-│   ├── Volume: {fp_volume:,}
+│   ├── Delta: {delta_str} ({fp_delta_pct:+.1f}%)
+│   ├── Volume: {vol_str}
 │   └── POC: ${fp_poc:.2f}"""
         else:
             footprint_section = "├── Footprint: (No data)"
 
-        cvd_formatted = f"{cvd_session:+,}" if cvd_session != 0 else "0"
+        # Format CVD using helper
+        cvd_formatted = _fmt_size(cvd_session, signed=True)
 
         return f"""## DELTA & FLOW
 

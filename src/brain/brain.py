@@ -338,8 +338,8 @@ class TradingBrain:
                 f.write(f"CALL #{call_num} - {timestamp}\n")
                 f.write("=" * 80 + "\n\n")
 
-                # Only write system prompt on first call
-                if call_num == 1:
+                # Only write system prompt on first call (call_num == 0 before increment)
+                if call_num == 0:
                     f.write("## SYSTEM PROMPT\n")
                     f.write("-" * 40 + "\n")
                     f.write(self._system_prompt + "\n\n")

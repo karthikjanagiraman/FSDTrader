@@ -286,6 +286,43 @@ class GroqProvider(LLMProvider):
                 })
         return formatted
 
+    def _coerce_argument_types(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Coerce string arguments to expected numeric types.
+
+        Groq sometimes returns numbers as strings (e.g., "415.80" instead of 415.80).
+        This method converts them to the expected types based on the tool schema.
+
+        Args:
+            tool_name: Name of the tool being called
+            arguments: Raw arguments from LLM response
+
+        Returns:
+            Arguments with numeric fields coerced to proper types
+        """
+        NUMERIC_FIELDS = {
+            "enter_long": ["limit_price", "stop_loss", "profit_target", "size"],
+            "enter_short": ["limit_price", "stop_loss", "profit_target", "size"],
+            "update_stop": ["new_price"],
+            "update_target": ["new_price"],
+        }
+        INT_FIELDS = {"size"}
+
+        numeric_fields = NUMERIC_FIELDS.get(tool_name, [])
+
+        for field in numeric_fields:
+            if field in arguments and isinstance(arguments[field], str):
+                try:
+                    if field in INT_FIELDS:
+                        arguments[field] = int(float(arguments[field]))
+                    else:
+                        arguments[field] = float(arguments[field])
+                    logger.debug(f"Coerced {field} from string to number")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to coerce {field}='{arguments[field]}' to number: {e}")
+
+        return arguments
+
     def parse_tool_calls(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Parse tool calls from Groq response.
@@ -331,6 +368,9 @@ class GroqProvider(LLMProvider):
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse tool arguments: {args_str}")
                 arguments = {}
+
+            # Coerce string arguments to expected numeric types
+            arguments = self._coerce_argument_types(name, arguments)
 
             tool_calls.append({
                 "name": name,

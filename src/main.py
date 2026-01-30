@@ -53,7 +53,7 @@ init(autoreset=True)
 # Configuration
 VERSION = "0.4.0-alpha"
 AGENT_NAME = "FSD-TRADER"
-LOOP_INTERVAL = 5.0  # Decision interval in seconds (0.2 Hz)
+LOOP_INTERVAL = 2.0  # Decision interval in seconds (avoid rate limits)
 
 
 def setup_logging(log_dir: str = "data/logs"):
@@ -287,7 +287,7 @@ class FSDTrader:
         self.connector = IBKRConnector(port=port)
 
         await self.connector.connect()
-        self.connector.subscribe_market_data(self.symbol)
+        await self.connector.subscribe_market_data(self.symbol)
 
         # Initialize IBKR executor
         self.executor = IBKRExecutor(
@@ -295,6 +295,7 @@ class FSDTrader:
             symbol=self.symbol,
             risk_limits=self.risk_limits,
         )
+        await self.executor.init()
 
         self.running = True
         await self._run_loop_live()
@@ -314,8 +315,26 @@ class FSDTrader:
                     continue
 
                 # Get current price and update executor
-                last_price = state.get("MARKET_STATE", {}).get("LAST", 0)
-                self.executor.update(last_price, time.time())
+                market_state = state.get("MARKET_STATE", {})
+                last_price = market_state.get("LAST", 0)
+                current_time = time.time()
+                self.executor.update(last_price, current_time)
+
+                # Record price for LLM context (price history section)
+                hod = market_state.get("HOD", 0)
+                lod = market_state.get("LOD", float('inf'))
+                vwap = market_state.get("VWAP", 0)
+
+                # Generate label for notable price levels
+                label = None
+                if hod > 0 and abs(last_price - hod) < 0.05:
+                    label = "HOD test"
+                elif lod < float('inf') and abs(last_price - lod) < 0.05:
+                    label = "LOD test"
+                elif vwap > 0 and abs(last_price - vwap) < 0.05:
+                    label = "VWAP test"
+
+                record_price(last_price, current_time, label)
 
                 # Get account state from executor
                 account_state = self.executor.get_account_state()
