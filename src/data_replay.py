@@ -408,11 +408,18 @@ class DataReplayConnector:
                 "SPREAD": book.get_spread(),
                 "DOM_WALLS": [
                     {"side": w.side, "price": w.price, "size": w.size,
-                     "tier": w.tier, "distance_pct": w.distance_pct}
+                     "tier": w.tier, "distance_pct": w.distance_pct,
+                     "percentile": w.percentile}
                     for w in book.get_walls(last_price)
                 ],
-                "BID_STACK": book.get_stack("BID"),
-                "ASK_STACK": book.get_stack("ASK"),
+                # Dynamic stacks - show levels up to first major wall
+                "BID_STACK_TO_WALL": book.get_stack_to_wall("BID"),
+                "ASK_STACK_TO_WALL": book.get_stack_to_wall("ASK"),
+                # Also include simple top-10 for backwards compatibility
+                "BID_STACK": book.get_stack("BID", levels=10),
+                "ASK_STACK": book.get_stack("ASK", levels=10),
+                # Book statistics for context
+                "BOOK_STATS": book.get_book_stats(),
 
                 # Tape
                 "TAPE_VELOCITY": vel_label,
