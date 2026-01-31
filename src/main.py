@@ -183,6 +183,9 @@ class FSDTrader:
         self.logger.info(f"Available dates: {dates[:5]}... ({len(dates)} total)")
         self.logger.info(f"Using date: {self.connector.date}")
 
+        # Start new trading session for memo system
+        self.brain.start_session()
+
         # Start replay
         self.running = True
         self.logger.info(f"Time range: {self.backtest_start_time} - {self.backtest_end_time}")
@@ -209,8 +212,8 @@ class FSDTrader:
             sim_time = self.connector.current_simulation_time
             last_price = state.get("MARKET_STATE", {}).get("LAST", 0)
 
-            # Skip if no price data yet
-            if last_price == 0:
+            # Skip if data not ready (NaN, 0, or missing)
+            if not last_price or (isinstance(last_price, float) and math.isnan(last_price)):
                 return
 
             # Track price history for context with labels for key levels
@@ -279,6 +282,9 @@ class FSDTrader:
             symbol=self.symbol,
         )
 
+        # Start new trading session for memo system
+        self.brain.start_session()
+
         self.running = True
         await self._run_loop_mock()
     
@@ -297,6 +303,9 @@ class FSDTrader:
             risk_limits=self.risk_limits,
         )
         await self.executor.init()
+
+        # Start new trading session for memo system
+        self.brain.start_session()
 
         self.running = True
         await self._run_loop_live()
