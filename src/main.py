@@ -15,6 +15,7 @@ Modes:
 import os
 import sys
 import time
+import math
 import asyncio
 import logging
 import argparse
@@ -317,6 +318,12 @@ class FSDTrader:
                 # Get current price and update executor
                 market_state = state.get("MARKET_STATE", {})
                 last_price = market_state.get("LAST", 0)
+
+                # Skip if data not ready (NaN, 0, or missing)
+                if not last_price or (isinstance(last_price, float) and math.isnan(last_price)):
+                    self.logger.debug("Waiting for market data...")
+                    await asyncio.sleep(LOOP_INTERVAL)
+                    continue
                 current_time = time.time()
                 self.executor.update(last_price, current_time)
 

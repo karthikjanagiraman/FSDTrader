@@ -32,6 +32,20 @@ ENTRY_TOOLS = [TOOL_ENTER_LONG, TOOL_ENTER_SHORT]
 # Modification tools
 MODIFICATION_TOOLS = [TOOL_UPDATE_STOP, TOOL_UPDATE_TARGET]
 
+# Memo field definition (shared across all tools)
+MEMO_FIELD = {
+    "type": "string",
+    "description": """Your self-notes for the next cycle. Format:
+@DELTA|[time]|[position]|
+same:[unchanged items]
+changed:[what's new]
+cumulative:[waits:N]
+thesis:"[one sentence market read]"
+watching:[specific triggers]
+invalidates:[what flips thesis]
+decision:[action(reason)]"""
+}
+
 
 TRADING_TOOLS: List[Dict[str, Any]] = [
     {
@@ -84,9 +98,10 @@ DO NOT USE WHEN:
                     "reasoning": {
                         "type": "string",
                         "description": "Brief explanation of why you're entering. Include: what signals you see, what confirms your thesis, what the stop is based on."
-                    }
+                    },
+                    "memo": MEMO_FIELD
                 },
-                "required": ["limit_price", "stop_loss", "profit_target", "conviction", "reasoning"]
+                "required": ["limit_price", "stop_loss", "profit_target", "conviction", "reasoning", "memo"]
             }
         }
     },
@@ -140,9 +155,10 @@ DO NOT USE WHEN:
                     "reasoning": {
                         "type": "string",
                         "description": "Brief explanation of why you're entering."
-                    }
+                    },
+                    "memo": MEMO_FIELD
                 },
-                "required": ["limit_price", "stop_loss", "profit_target", "conviction", "reasoning"]
+                "required": ["limit_price", "stop_loss", "profit_target", "conviction", "reasoning", "memo"]
             }
         }
     },
@@ -172,9 +188,10 @@ TRAILING STOP LOGIC:
                     "reasoning": {
                         "type": "string",
                         "description": "Why are you moving the stop? What level or condition justifies this?"
-                    }
+                    },
+                    "memo": MEMO_FIELD
                 },
-                "required": ["new_price", "reasoning"]
+                "required": ["new_price", "reasoning", "memo"]
             }
         }
     },
@@ -203,9 +220,10 @@ TARGET ADJUSTMENT LOGIC:
                     "reasoning": {
                         "type": "string",
                         "description": "Why are you adjusting the target?"
-                    }
+                    },
+                    "memo": MEMO_FIELD
                 },
-                "required": ["new_price", "reasoning"]
+                "required": ["new_price", "reasoning", "memo"]
             }
         }
     },
@@ -229,9 +247,10 @@ Stop and target orders will be cancelled automatically.""",
                     "reasoning": {
                         "type": "string",
                         "description": "Why are you exiting? What changed?"
-                    }
+                    },
+                    "memo": MEMO_FIELD
                 },
-                "required": ["reasoning"]
+                "required": ["reasoning", "memo"]
             }
         }
     },
@@ -260,9 +279,10 @@ ALWAYS provide reasoning that includes:
                     "reasoning": {
                         "type": "string",
                         "description": "Why are you waiting? What would make you act? Be specific about what you're watching for."
-                    }
+                    },
+                    "memo": MEMO_FIELD
                 },
-                "required": ["reasoning"]
+                "required": ["reasoning", "memo"]
             }
         }
     }

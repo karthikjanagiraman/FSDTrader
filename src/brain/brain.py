@@ -18,6 +18,7 @@ from .prompts import get_system_prompt
 from .context import ContextBuilder, get_context_builder
 from .validation import validate_tool_call
 from .providers import get_provider, LLMProvider
+from .memo import MemoManager, parse_memo_from_response, parse_position_from_memo, wrap_memo_chain
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ class TradingBrain:
         self._context_builder = get_context_builder()
         self._system_prompt = get_system_prompt()
 
+        # Memo system for persistent LLM context
+        self._memo_manager = MemoManager(max_deltas=5)
+
         # State
         self._decision_history: deque = deque(maxlen=MAX_DECISION_HISTORY)
         self._total_calls = 0
@@ -107,6 +111,20 @@ class TradingBrain:
             f"model={self._provider.model_name}"
         )
 
+    def start_session(self, timestamp: Optional[str] = None):
+        """
+        Start a new trading session. Call at market open or session start.
+
+        This initializes the memo system for a fresh session.
+
+        Args:
+            timestamp: Session start time (defaults to current time)
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+        self._memo_manager.start_session(timestamp)
+        logger.info(f"Trading session started at {timestamp}")
+
     def think(self, state: Dict[str, Any]) -> str:
         """
         Make a trading decision based on current state.
@@ -135,13 +153,23 @@ class TradingBrain:
             account_state = state.get("ACCOUNT_STATE", {})
             active_orders = state.get("ACTIVE_ORDERS", [])
 
-            # Build context
-            context = self._context_builder.build(
+            # Get current timestamp for memo
+            current_time = datetime.now().strftime("%H:%M:%S")
+
+            # Get current position status
+            position_status = account_state.get("POSITION_SIDE", "FLAT")
+
+            # Build market context (unchanged from existing code)
+            market_context = self._context_builder.build(
                 market_state=market_state,
                 account_state=account_state,
                 history=list(self._decision_history),
                 active_orders=active_orders,
             )
+
+            # Prepend memo chain to context
+            memo_section = wrap_memo_chain(self._memo_manager.get_chain())
+            context = memo_section + market_context
 
             # Call LLM
             response = self._provider.call(
@@ -155,9 +183,26 @@ class TradingBrain:
             # Parse tool call
             tool_call = self._parse_response(response)
 
+            # Extract memo from tool call arguments (memo is now a required field)
+            memo_text = tool_call.arguments.pop("memo", None)
+            if memo_text:
+                # Detect position from memo (may have changed due to entry)
+                new_position = parse_position_from_memo(memo_text)
+                if new_position == "UNKNOWN":
+                    new_position = position_status  # Fallback
+
+                self._memo_manager.add_memo(
+                    memo_text=memo_text,
+                    timestamp=current_time,
+                    position=new_position
+                )
+                logger.debug(f"Memo stored: {self._memo_manager.get_chain_for_logging()}")
+            else:
+                logger.debug("No memo found in LLM response")
+
             # Log context and response
             if self._log_contexts:
-                self._log_llm_context(context, response, tool_call)
+                self._log_llm_context(context, response, tool_call, memo_text)
 
             # Note: Validation layer disabled - letting the LLM make autonomous decisions
             # The LLM has full context and should decide what's best for profitability
@@ -271,6 +316,7 @@ class TradingBrain:
                 - decision_count: Decisions in history
                 - provider: Provider name
                 - model: Model name
+                - memo_stats: Memo system statistics
         """
         avg_latency = (
             self._total_latency_ms / self._total_calls
@@ -284,6 +330,7 @@ class TradingBrain:
             "decision_count": len(self._decision_history),
             "provider": self._provider.provider_name,
             "model": self._provider.model_name,
+            "memo_stats": self._memo_manager.get_stats(),
         }
 
     def get_decision_history(self) -> List[Decision]:
@@ -304,18 +351,28 @@ class TradingBrain:
             ),
         )
 
+    def get_memo_chain(self) -> str:
+        """Get current memo chain for debugging."""
+        return self._memo_manager.get_chain()
+
+    def get_latest_thesis(self) -> Optional[str]:
+        """Get the latest thesis from memo system."""
+        return self._memo_manager.get_latest_thesis()
+
     def reset(self):
-        """Reset brain state (clear history)."""
+        """Reset brain state (clear history and memos)."""
         self._decision_history.clear()
         self._total_calls = 0
         self._total_latency_ms = 0.0
+        self._memo_manager.start_session(datetime.now().strftime("%H:%M:%S"))
         logger.info("Brain state reset")
 
     def _log_llm_context(
         self,
         context: str,
         response: LLMResponse,
-        tool_call: ToolCall
+        tool_call: ToolCall,
+        memo_text: Optional[str] = None
     ) -> None:
         """
         Log the full LLM context and response for debugging.
@@ -324,6 +381,7 @@ class TradingBrain:
         - Call number and timestamp
         - User message (context) - system prompt only on first call
         - LLM response (tool call)
+        - Memo (if present)
         - Usage stats
         """
         if not self._context_log_file:
@@ -354,6 +412,12 @@ class TradingBrain:
                 f.write(f"Arguments: {json.dumps(tool_call.arguments, indent=2)}\n")
                 f.write(f"Conviction: {tool_call.conviction}\n")
                 f.write(f"Reasoning: {tool_call.reasoning}\n\n")
+
+                # Log memo if present
+                if memo_text:
+                    f.write("## MEMO\n")
+                    f.write("-" * 40 + "\n")
+                    f.write(memo_text + "\n\n")
 
                 f.write("## USAGE STATS\n")
                 f.write("-" * 40 + "\n")
