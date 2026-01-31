@@ -150,16 +150,16 @@ class FSDTrader:
             await self._start_live()
     
     async def _start_backtest(self):
-        """Start backtest mode with real MBO data."""
-        from data_replay import MBOReplayConnector
+        """Start backtest mode with real L2 data."""
+        from data_replay import DataReplayConnector
 
         self.logger.info(f"{Fore.CYAN}Starting BACKTEST mode")
 
         # Initialize replay connector (path relative to project root)
         import os
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_dir = os.path.join(project_root, "BacktestData", "TSLA-L3DATA")
-        self.connector = MBOReplayConnector(
+        data_dir = os.path.join(project_root, "BacktestData", "TSLA-L2DATA")
+        self.connector = DataReplayConnector(
             data_dir=data_dir,
             date=self.backtest_date,
             symbol=self.symbol
