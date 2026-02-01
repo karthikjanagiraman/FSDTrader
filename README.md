@@ -2,7 +2,7 @@
 
 > An autonomous TSLA trading system using LLM-based decision making with real-time order flow analysis.
 
-**Version:** 0.4.0-alpha
+**Version:** 3.2.0
 
 ---
 
@@ -12,8 +12,9 @@ FSDTrader is a momentum/scalping system that uses Large Language Models (LLMs) w
 
 ### Key Features
 
-- **Order Flow Analysis**: Real-time L2/L3 market data processing with 7 specialized analyzers
-- **LLM Decision Engine**: Native function calling for structured trade decisions (Grok, OpenAI)
+- **Order Flow Analysis**: Real-time L2 market data processing with 7 specialized analyzers
+- **LLM Decision Engine**: Native function calling for structured trade decisions (Groq, Grok, OpenAI)
+- **Memo System**: Persistent LLM context via self-notes (@INIT/@DELTA chain)
 - **Bracket Order Execution**: Automated stop loss and profit target management
 - **Multi-Mode Operation**: Backtest, simulation, paper, and live trading
 - **Data Parity**: Identical data structures across all modes
@@ -47,8 +48,8 @@ FSDTrader is a momentum/scalping system that uses Large Language Models (LLMs) w
       │                      │                       │
  ┌────┴────┐           ┌─────┴─────┐          ┌──────┴──────┐
  ▼         ▼           ▼           ▼          ▼             ▼
-IBKR    MBO Replay   Grok      OpenAI    Simulated      IBKR
-Connector           Provider   Provider   Executor     Executor
+IBKR    MBP-10      Groq/Grok   OpenAI    Simulated      IBKR
+Connector  Replay   Provider   Provider   Executor     Executor
 ```
 
 ### Modules
@@ -57,8 +58,8 @@ Connector           Provider   Provider   Executor     Executor
 |--------|-------------|
 | `main.py` | Orchestration, mode selection, main trading loop |
 | `market_data.py` | Order book, tape, CVD, volume profile, absorption detection |
-| `data_replay.py` | MBO file replay for backtesting with Databento data |
-| `brain/` | LLM interaction, prompt engineering, tool definitions, validation |
+| `data_replay.py` | MBP-10 file replay for backtesting with Databento data |
+| `brain/` | LLM interaction, prompt engineering, tool definitions, memo system |
 | `execution/` | Order management, position tracking, P&L calculation |
 | `reporting/` | Backtest reports and trade analysis |
 
@@ -159,7 +160,7 @@ pytest>=8.0.0          # Testing
 
 | Mode | Command | Data Source | Executor |
 |------|---------|-------------|----------|
-| **Backtest** | `--backtest` | MBO Replay | Simulated |
+| **Backtest** | `--backtest` | MBP-10 Replay | Simulated |
 | **Simulation** | `--sim` | Mock Data | Simulated |
 | **Paper** | (default) | IBKR (7497) | IBKR |
 | **Live** | `--live` | IBKR (7496) | IBKR |
@@ -167,8 +168,8 @@ pytest>=8.0.0          # Testing
 ### Examples
 
 ```bash
-# Backtest with real L3 data
-python src/main.py --backtest --date 20251023 --speed 100
+# Backtest with real L2 data
+python src/main.py --backtest --date 20260112 --speed 100
 
 # Simulation with mock data
 python src/main.py --sim
@@ -180,7 +181,7 @@ python src/main.py --symbol TSLA
 python src/main.py --live --symbol TSLA
 
 # Use different LLM provider
-python src/main.py --provider openai --model gpt-4o
+python src/main.py --provider groq --model llama-3.3-70b-versatile
 ```
 
 ### Command Line Options
@@ -193,7 +194,7 @@ python src/main.py --provider openai --model gpt-4o
 | `--speed` | 100 | Backtest speed multiplier |
 | `--sim` | - | Enable simulation mode |
 | `--live` | - | Enable live trading |
-| `--provider` | grok | LLM provider (grok, openai) |
+| `--provider` | groq | LLM provider (groq, grok, openai) |
 | `--model` | - | Model override |
 
 ---
@@ -205,16 +206,18 @@ FSDTrader/
 ├── src/
 │   ├── main.py              # Main orchestrator
 │   ├── market_data.py       # 7 order flow analyzers + IBKR connector
-│   ├── data_replay.py       # MBO file replay for backtesting
+│   ├── data_replay.py       # MBP-10 file replay for backtesting
 │   ├── brain/
 │   │   ├── brain.py         # TradingBrain (LLM decision engine)
-│   │   ├── prompts.py       # System prompt (v3.0.0)
+│   │   ├── prompts.py       # System prompt (v3.3.0)
 │   │   ├── tools.py         # 6 tool definitions
 │   │   ├── context.py       # State -> LLM context builder
+│   │   ├── memo.py          # MemoManager (persistent LLM context)
 │   │   ├── validation.py    # Pre-flight tool call validation
 │   │   └── providers/
 │   │       ├── base.py      # LLMProvider ABC
-│   │       └── grok.py      # xAI Grok provider
+│   │       ├── grok.py      # xAI Grok provider
+│   │       └── groq.py      # Groq provider
 │   ├── execution/
 │   │   ├── base.py          # ExecutionProvider ABC
 │   │   ├── types.py         # Position, BracketOrder, TradeRecord
@@ -223,10 +226,11 @@ FSDTrader/
 │   └── reporting/
 │       └── backtest.py      # Report generation
 ├── tests/
-│   └── test_execution.py    # 69 unit tests
-├── requirements/
-│   └── FSDTRADER_REQUIREMENTS.md  # Comprehensive requirements doc
-├── BacktestData/            # MBO data files (not in repo)
+│   └── test_execution.py    # Unit tests
+├── docs/
+│   └── REQUIREMENTS.md      # Comprehensive requirements doc (v3.2.0)
+├── BacktestData/
+│   └── TSLA-L2DATA/         # MBP-10 data files (Git LFS)
 └── data/logs/               # Trading logs
 ```
 
@@ -234,28 +238,36 @@ FSDTrader/
 
 ## LLM Tools
 
-The Brain module provides 6 tools via native function calling:
+The Brain module provides 6 tools via native function calling. All tools require `reasoning` and `memo` fields.
 
 | Tool | Description | Arguments |
 |------|-------------|-----------|
-| `enter_long` | Enter long position with bracket | limit_price, stop_loss, profit_target, size, conviction |
-| `enter_short` | Enter short position with bracket | limit_price, stop_loss, profit_target, size, conviction |
-| `update_stop` | Modify stop loss | new_price |
-| `update_target` | Modify profit target | new_price |
-| `exit_position` | Exit at market | reasoning |
-| `wait` | No action | reasoning |
+| `enter_long` | Enter long position with bracket | limit_price, stop_loss, profit_target, qty, conviction, reasoning, memo |
+| `enter_short` | Enter short position with bracket | limit_price, stop_loss, profit_target, qty, conviction, reasoning, memo |
+| `update_stop` | Modify stop loss | new_price, reasoning, memo |
+| `update_target` | Modify profit target | new_price, reasoning, memo |
+| `exit_position` | Exit at market | reasoning, memo |
+| `wait` | No action | reasoning, memo |
+
+### Memo System
+
+The LLM maintains persistent context via self-notes across trading cycles:
+- `@INIT` - Initial session assessment (first decision)
+- `@DELTA` - What changed since last snapshot (subsequent decisions)
+- Format: `@DELTA|[time]|[position]|same:[unchanged]|changed:[what's new]|thesis:"[market read]"|watching:[triggers]`
 
 ---
 
 ## Data Schemas
 
-### MARKET_STATE (30 fields)
+### MARKET_STATE (31 fields)
 
 ```python
 {
     "TICKER": "TSLA",
     "LAST": 245.50,
     "VWAP": 245.10,
+    "MARKET_TIME": "09:35:15",  # ET market time
     "TIME_SESSION": "MORNING",
 
     # Level 2
@@ -325,6 +337,7 @@ python -m pytest tests/test_execution.py -v
 | Variable | Description |
 |----------|-------------|
 | `XAI_API_KEY` or `GROK_API_KEY` | Grok API key |
+| `GROQ_API_KEY` | Groq API key |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `IBKR_PORT` | TWS port (default: 7497) |
 
@@ -332,8 +345,7 @@ python -m pytest tests/test_execution.py -v
 
 ## Documentation
 
-- [Comprehensive Requirements](requirements/FSDTRADER_REQUIREMENTS.md) - Full system specification
-- [Prompting Guide](prompt_guide/) - LLM prompting strategy
+- [Comprehensive Requirements](docs/REQUIREMENTS.md) - Full system specification (v3.2.0)
 
 ---
 
