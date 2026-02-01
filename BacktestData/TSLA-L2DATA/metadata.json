@@ -1,16 +1,16 @@
 {
     "version": 1,
-    "job_id": "XNAS-20251116-AHVKFFXSFX",
+    "job_id": "XNAS-20260131-YNRWXMNRDV",
     "query": {
         "dataset": "XNAS.ITCH",
-        "schema": "mbo",
+        "schema": "mbp-10",
         "symbols": [
             "TSLA"
         ],
         "stype_in": "raw_symbol",
         "stype_out": "instrument_id",
-        "start": 1760486400000000000,
-        "end": 1763164800000000000,
+        "start": 1768176000000000000,
+        "end": 1768521600000000000,
         "limit": null,
         "encoding": "dbn",
         "compression": "zstd"
