@@ -1,7 +1,7 @@
 # FSDTrader: Comprehensive System Requirements & Design
 
-**Version:** 3.0.0
-**Date:** 2026-01-26
+**Version:** 3.2.0
+**Date:** 2026-01-31
 **Status:** Implementation Complete
 
 ---
@@ -31,7 +31,7 @@ FSDTrader is an autonomous day trading system for TSLA that uses Large Language 
 
 ### 1.2 Key Features
 
-- **Order Flow Analysis**: Real-time L2/L3 market data processing
+- **Order Flow Analysis**: Real-time L2 market data processing (MBP-10 for backtest)
 - **LLM Decision Engine**: Native function calling for structured trade decisions
 - **Bracket Order Execution**: Automated stop loss and profit target management
 - **Multi-Mode Operation**: Backtest, simulation, paper, and live trading
@@ -66,12 +66,12 @@ FSDTrader is an autonomous day trading system for TSLA that uses Large Language 
    ┌────┴────────┐          ┌─────┴─────┐            ┌──────┴──────┐
    ▼             ▼          ▼           ▼            ▼             ▼
 ┌──────────┐ ┌──────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌──────────┐
-│   IBKR   │ │   MBO    │ │  Grok   │ │  Groq   │ │ OpenAI  │ │Simulated │ │   IBKR   │
-│ Connector│ │ Replay   │ │Provider │ │ Provider│ │ Provider│ │ Executor │ │ Executor │
+│   IBKR   │ │  MBP-10  │ │  Grok   │ │  Groq   │ │ OpenAI  │ │Simulated │ │   IBKR   │
+│ Connector│ │  Replay  │ │Provider │ │ Provider│ │ Provider│ │ Executor │ │ Executor │
 └──────────┘ └──────────┘ └─────────┘ └─────────┘ └─────────┘ └──────────┘ └──────────┘
      │            │             │           │           │            │            │
      ▼            ▼             ▼           ▼           ▼            ▼            ▼
-  TWS API   Databento DBN    xAI API   Groq API   OpenAI API  Virtual Acc   Real Orders
+  TWS API   Databento MBP-10  xAI API   Groq API   OpenAI API  Virtual Acc   Real Orders
 ```
 
 ### 2.2 Module Responsibilities
@@ -80,7 +80,7 @@ FSDTrader is an autonomous day trading system for TSLA that uses Large Language 
 |--------|---------------|
 | `main.py` | Orchestration, mode selection, main loop |
 | `market_data.py` | Order book, tape, CVD, volume profile, absorption |
-| `data_replay.py` | MBO file replay for backtesting |
+| `data_replay.py` | MBP-10 (L2) file replay for backtesting |
 | `brain/` | LLM interaction, prompt engineering, tool definitions |
 | `execution/` | Order management, position tracking, P&L calculation |
 | `reporting/` | Backtest reports, trade analysis |
@@ -194,27 +194,80 @@ The system maintains seven analysis components, each providing specific market i
 
 ```python
 class OrderBook:
-    """Real-time Level 2 Order Book with Wall Detection."""
+    """
+    Real-time Level 2 Order Book with Smart Wall Detection.
 
-    bids: Dict[float, int]  # Price -> Size
+    Key features:
+    - Cumulative sizes at each price level (aggregates multiple market makers)
+    - Percentile-based wall detection (adapts to current market conditions)
+    - Dynamic stack depth (shows levels up to first major wall)
+    - Full-book imbalance calculation
+    """
+
+    bids: Dict[float, int]  # Price -> Cumulative Size
     asks: Dict[float, int]
 
+    # Percentile thresholds (recalculated on each update)
+    _p75: float  # 75th percentile threshold
+    _p90: float  # 90th percentile threshold
+    _p95: float  # 95th percentile threshold
+
+    def update_from_dom_levels(self, dom_bids, dom_asks):
+        """ACCUMULATE sizes from multiple market makers at same price."""
+
     def get_imbalance(self) -> float:
-        """Bid/ask volume ratio (top 5 levels)."""
+        """Total bid volume / total ask volume (ALL levels, not just top 5)."""
 
     def get_spread(self) -> float:
         """Best ask - best bid."""
 
     def get_walls(self, last_price: float) -> List[DOMWall]:
-        """Detect significant orders (>3x average size)."""
+        """Detect walls using percentile-based thresholds (up to 10 walls)."""
 
-    def get_stack(self, side: str, levels: int = 3) -> List[List]:
+    def get_stack(self, side: str, levels: int = 10) -> List[List]:
         """Top N price levels with sizes."""
+
+    def get_stack_to_wall(self, side: str, max_levels: int = 15) -> List[Dict]:
+        """Get levels from best price UP TO first major/massive wall.
+        Returns: [{price, size, cumulative_size, level, is_wall, wall_tier}]"""
+
+    def get_book_stats(self) -> Dict[str, Any]:
+        """Summary statistics: level counts, total volumes, percentile thresholds."""
 ```
 
-**Wall Detection Tiers**:
-- MAJOR: Size > 5x average
-- MINOR: Size > 3x average
+**Cumulative Size Aggregation**:
+```
+Multiple market makers at same price → aggregated total
+Example: NSDQ 200 @ 420.50 + ARCA 150 @ 420.50 = 350 @ 420.50
+```
+
+**Wall Detection (Percentile-Based)**:
+Wall tiers are determined relative to current market conditions:
+
+| Tier | Threshold | Meaning |
+|------|-----------|---------|
+| MASSIVE | > 95th percentile | Exceptional size, very likely to hold |
+| MAJOR | > 90th percentile | Significant resistance/support |
+| MINOR | > 75th percentile | Notable but may be absorbed |
+
+**Why Percentile-Based Detection**:
+- Static thresholds (e.g., ">3x average") fail in varying market conditions
+- A 2000-share wall is huge in low-volume midday, normal during open
+- Percentile thresholds automatically adapt to current market activity
+
+**DOMWall Structure**:
+```python
+@dataclass
+class DOMWall:
+    side: str           # "BID" or "ASK"
+    price: float
+    size: int
+    tier: str           # "MASSIVE" (>p95), "MAJOR" (>p90), "MINOR" (>p75)
+    distance_pct: float
+    percentile: float   # Which percentile this size is at
+```
+
+**IBKR Depth**: `reqMktDepth(numRows=50, isSmartDepth=True)` for deep raw data
 
 #### 4.1.2 TapeStream (Time & Sales)
 
@@ -359,22 +412,29 @@ tape.get_velocity(timestamp=self.current_simulation_time)
 - Receives tick-by-tick trade data
 - Updates all analysis components in real-time
 
-#### 4.3.2 MBOReplayConnector (Backtest)
+#### 4.3.2 DataReplayConnector (Backtest)
 
-- Reads Databento MBO (Market-by-Order) files
-- Reconstructs order book from ADD/CANCEL/MODIFY events
-- Processes TRADE/FILL events for tape analysis
-- Maintains simulation time for accurate timing
+- Reads Databento MBP-10 (Market-by-Price, 10 levels) files
+- Populates order book from 10-level aggregated bid/ask depth snapshots
+- Processes TRADE events for tape analysis
+- Maintains simulation time with UTC to ET conversion
+- Calls `_update_percentiles()` after book population for wall detection
 
-**MBO Event Mapping**:
+**MBP-10 Data Format**:
 
-| MBO Action | Description | Order Book Update |
-|------------|-------------|-------------------|
-| ADD | New order | Add size at price |
-| CANCEL | Order cancelled | Remove size from price |
-| MODIFY | Order modified | Remove old, add new |
-| TRADE | Trade execution | Feed to all analyzers |
-| FILL | Partial/full fill | Feed to all analyzers |
+| Field | Description |
+|-------|-------------|
+| `ts_event` | Nanosecond timestamp (UTC) |
+| `action` | Event type (TRADE, ADD, etc.) |
+| `levels` | Array of 10 BidAskPair with bid_px, ask_px, bid_sz, ask_sz |
+| `price` | Top-of-book price (for TRADE events) |
+| `size` | Trade size (for TRADE events) |
+
+**Key Differences from MBO**:
+- MBP-10 provides pre-aggregated 10-level depth (smaller files, faster replay)
+- No individual order tracking (ADD/CANCEL/MODIFY)
+- Book state is replaced on each snapshot, not incrementally updated
+- Trade detection via `action == 'TRADE'`
 
 ---
 
@@ -658,9 +718,73 @@ The system prompt defines the LLM's:
 6. **Hard Limits**: Spread, stop distance, risk/reward
 7. **Tool Usage**: Which tool for which situation
 
-**Version**: 3.0.0 (tracked for reproducibility)
+**Version**: 3.3.0 (tracked for reproducibility)
 
-### 6.3 Tool Definitions
+### 6.3 Memo System (Persistent LLM Context)
+
+The memo system enables the LLM to maintain persistent context across trading cycles by writing self-notes.
+
+#### Architecture
+
+```python
+class MemoManager:
+    """Manages rolling chain of LLM self-notes."""
+
+    def __init__(self, max_deltas: int = 5):
+        """Keep @INIT + last N @DELTA memos."""
+
+    def start_session(self, timestamp: str):
+        """Clear memos at session start."""
+
+    def add_memo(self, memo_text: str, timestamp: str, position: str):
+        """Store memo from LLM response (first = @INIT, rest = @DELTA)."""
+
+    def get_chain(self) -> str:
+        """Get formatted memo chain for prompt injection."""
+```
+
+#### Memo Format
+
+The LLM writes memos in a structured format:
+
+```
+@DELTA|[time]|[position]|same:[unchanged]|changed:[what's new]|
+cumulative:[waits:N]|thesis:"[market read]"|watching:[triggers]|
+invalidates:[flip conditions]|decision:[action(reason)]
+```
+
+**Example:**
+```
+@DELTA|09:35:15|LONG|same:[trend up]|changed:[entered on absorption]|
+cumulative:[waits:8,entries:1]|thesis:"Breakout in progress"|
+watching:[415.50 hold]|invalidates:[break below 415.20]|
+decision:[enter_long(absorption confirmed)]
+```
+
+#### How It Works
+
+1. **Session Start**: `MemoManager.start_session()` clears previous memos
+2. **First Decision**: LLM writes @INIT memo (initial market assessment)
+3. **Subsequent Decisions**: LLM writes @DELTA memos (what changed)
+4. **Context Injection**: `wrap_memo_chain()` injects into next prompt as SESSION MEMORY
+5. **Rolling Window**: Only last 5 @DELTAs kept (plus @INIT)
+
+#### Memo Fields
+
+| Field | Purpose |
+|-------|---------|
+| `thesis` | Current market hypothesis |
+| `watching` | Specific triggers waiting for |
+| `invalidates` | What would flip the thesis |
+| `cumulative` | Running counters (waits, entries) |
+| `same` | What stayed unchanged |
+| `changed` | What's new since last memo |
+
+#### Required in All Tool Calls
+
+Every tool call must include a `memo` field. The memo is extracted from the LLM response and stored by the brain after each decision.
+
+### 6.5 Tool Definitions
 
 Six tools available via native function calling:
 
@@ -675,15 +799,17 @@ TRADING_TOOLS = [
             "profit_target": {"type": "number"},
             "size": {"type": "integer", "default": 100},
             "conviction": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
-            "reasoning": {"type": "string"}
+            "reasoning": {"type": "string"},
+            "memo": {"type": "string"}  # Required: self-note for context persistence
         },
-        "required": ["limit_price", "stop_loss", "profit_target", "conviction", "reasoning"]
+        "required": ["limit_price", "stop_loss", "profit_target", "conviction", "reasoning", "memo"]
     },
     # ... enter_short, update_stop, update_target, exit_position, wait
+    # All tools require reasoning and memo fields
 ]
 ```
 
-### 6.4 Context Building
+### 6.6 Context Building
 
 The Brain receives a structured snapshot of market conditions:
 
@@ -713,7 +839,7 @@ Status: {account['POSITION_SIDE']}
     return context
 ```
 
-### 6.5 Decision Flow
+### 6.7 Decision Flow
 
 1. **Receive State**: Market snapshot from connector
 2. **Build Context**: Format state for LLM consumption (uses shared ContextBuilder with price history)
@@ -725,7 +851,7 @@ Status: {account['POSITION_SIDE']}
 
 > **Note (v3.0.0):** Brain-level validation (step 6 in v2.0.0) has been disabled. The LLM makes autonomous decisions without pre-flight checks on stop distance, position size, or risk/reward. The validation module exists in code but `validate_tool_call()` is not called.
 
-### 6.6 Validation (DISABLED)
+### 6.8 Validation (DISABLED)
 
 The validation framework exists but is **not active**. The LLM is trusted to make appropriate decisions based on the full context it receives including risk parameters in the system prompt.
 
@@ -737,7 +863,7 @@ class ValidationResult:
     warnings: List[str]
 ```
 
-### 6.7 Session Logging
+### 6.9 Session Logging
 
 LLM context logging uses one file per backtest session (not per call):
 
@@ -752,7 +878,7 @@ LLM context logging uses one file per backtest session (not per call):
 # - Usage stats (latency, token counts)
 ```
 
-### 6.8 Shared Context Builder
+### 6.10 Shared Context Builder
 
 The `ContextBuilder` is a shared module-level instance (via `get_context_builder()`) so that `record_price()` calls from `main.py` and the brain's context building use the same price history:
 
@@ -765,7 +891,7 @@ record_price(last_price, price_time, label)  # e.g., label="HOD test"
 self._context_builder = get_context_builder()  # Same instance
 ```
 
-### 6.9 LLM Providers
+### 6.11 LLM Providers
 
 | Provider | API | Default Model | Key Feature |
 |----------|-----|---------------|-------------|
@@ -856,20 +982,42 @@ Both IBKRConnector and MBOReplayConnector output identical structure:
         "TICKER": str,              # "TSLA"
         "LAST": float,              # Last trade price
         "VWAP": float,              # Volume-weighted average price
+        "MARKET_TIME": str,         # Current market time in ET (HH:MM:SS)
         "TIME_SESSION": str,        # OPEN_DRIVE | OPEN_RANGE | MORNING | MIDDAY | CLOSE
 
-        # Level 2 (DOM)
-        "L2_IMBALANCE": float,      # Bid/ask volume ratio (top 5 levels)
+        # Level 2 (DOM) - Smart Processing with Cumulative Sizes
+        "L2_IMBALANCE": float,      # Total bid/ask volume ratio (ALL levels)
         "SPREAD": float,            # Best ask - best bid
-        "DOM_WALLS": List[{         # Significant orders
+        "DOM_WALLS": List[{         # Significant orders (percentile-based)
             "side": str,            # BID | ASK
             "price": float,
             "size": int,
-            "tier": str,            # MAJOR | MINOR
-            "distance_pct": float
+            "tier": str,            # MASSIVE (>p95) | MAJOR (>p90) | MINOR (>p75)
+            "distance_pct": float,
+            "percentile": float     # Which percentile this size is at
         }],
-        "BID_STACK": List[[price, size]],  # Top 3 bid levels
-        "ASK_STACK": List[[price, size]],  # Top 3 ask levels
+        "BID_STACK": List[[price, size]],  # Top 10 bid levels (simple)
+        "ASK_STACK": List[[price, size]],  # Top 10 ask levels (simple)
+        "BID_STACK_TO_WALL": List[{        # Dynamic depth - up to major wall
+            "price": float,
+            "size": int,
+            "cumulative_size": int,
+            "level": int,
+            "is_wall": bool,
+            "wall_tier": str | None
+        }],
+        "ASK_STACK_TO_WALL": List[{...}],  # Same structure for asks
+        "BOOK_STATS": {                     # Summary statistics
+            "bid_levels": int,
+            "ask_levels": int,
+            "total_bid_volume": int,
+            "total_ask_volume": int,
+            "avg_bid_size": int,
+            "avg_ask_size": int,
+            "p75_threshold": float,
+            "p90_threshold": float,
+            "p95_threshold": float
+        },
 
         # Tape (Time & Sales)
         "TAPE_VELOCITY": str,       # LOW | MEDIUM | HIGH
@@ -972,7 +1120,7 @@ Both IBKRConnector and MBOReplayConnector output identical structure:
 
 | Mode | CLI Flag | Data Source | Executor | Description |
 |------|----------|-------------|----------|-------------|
-| Backtest | `--backtest` | MBOReplayConnector | SimulatedExecutor | Historical replay |
+| Backtest | `--backtest` | DataReplayConnector | SimulatedExecutor | Historical replay (MBP-10) |
 | Simulation | `--sim` | MockDataGenerator | SimulatedExecutor | Random mock data |
 | Paper | `--paper` | IBKRConnector (7497) | IBKRExecutor | IBKR paper account |
 | Live | `--live` | IBKRConnector (7496) | IBKRExecutor | IBKR live account |
@@ -981,9 +1129,9 @@ Both IBKRConnector and MBOReplayConnector output identical structure:
 
 ```python
 async def _start_backtest(self):
-    # Initialize MBO replay
-    self.connector = MBOReplayConnector(
-        data_dir="BacktestData/TSLA-L3DATA",
+    # Initialize MBP-10 replay
+    self.connector = DataReplayConnector(
+        data_dir="BacktestData/TSLA-L2DATA",
         date=self.backtest_date,
         symbol=self.symbol
     )
@@ -1070,6 +1218,12 @@ async def _on_state_update(self, state):
 ### 10.1 Market Data Layer
 
 - [x] OrderBook with wall detection
+  - [x] Cumulative sizes (multiple market makers at same price)
+  - [x] Percentile-based wall detection (p75/p90/p95 thresholds)
+  - [x] Dynamic stack depth (up to major wall)
+  - [x] Full-book imbalance calculation
+  - [x] Book statistics (level counts, volumes, thresholds)
+  - [x] IBKR 50-level depth request
 - [x] TapeStream with velocity and sentiment
 - [x] FootprintTracker with delta analysis
 - [x] CumulativeDelta with trend detection
@@ -1077,9 +1231,10 @@ async def _on_state_update(self, state):
 - [x] AbsorptionDetector
 - [x] MarketMetrics (VWAP, HOD, LOD, RVOL)
 - [x] IBKRConnector (live data)
-- [x] MBOReplayConnector (backtest data)
+- [x] DataReplayConnector (backtest MBP-10 data)
 - [x] All components accept `timestamp` parameter
 - [x] get_full_state() returns identical schema
+- [x] MARKET_TIME field (ET timezone conversion in backtest)
 
 ### 10.2 Execution Layer
 
@@ -1102,10 +1257,14 @@ async def _on_state_update(self, state):
 
 ### 10.3 Brain Module
 
-- [x] System prompt (v3.0.0)
-- [x] Tool definitions (6 tools)
+- [x] System prompt (v3.3.0)
+- [x] Tool definitions (6 tools with memo field)
 - [x] Context builder (shared instance with price history)
 - [x] Decision history tracking
+- [x] Memo system for persistent LLM context
+  - [x] MemoManager with rolling @INIT + @DELTA chain
+  - [x] Memo parsing from LLM responses
+  - [x] SESSION MEMORY injection into prompts
 - [x] Validation framework (exists but DISABLED)
 - [x] GrokProvider (xAI)
 - [x] GroqProvider (Llama 3.3 70B via Groq)
@@ -1152,18 +1311,19 @@ FSDTrader/
 │   │   ├── MarketMetrics
 │   │   └── IBKRConnector
 │   │
-│   ├── data_replay.py                # MBO replay
-│   │   └── MBOReplayConnector
+│   ├── data_replay.py                # MBP-10 (L2) replay
+│   │   └── DataReplayConnector
 │   │
 │   ├── reporting.py                  # BacktestReporter
 │   │
 │   ├── brain/
 │   │   ├── __init__.py
-│   │   ├── brain.py                  # TradingBrain (session logging)
-│   │   ├── prompts.py                # System prompt
-│   │   ├── tools.py                  # Tool definitions
+│   │   ├── brain.py                  # TradingBrain (session logging, memo integration)
+│   │   ├── prompts.py                # System prompt (v3.3.0)
+│   │   ├── tools.py                  # Tool definitions (with memo field)
 │   │   ├── types.py                  # ToolCall, Decision, etc.
 │   │   ├── context.py                # Context builder (shared instance, price history)
+│   │   ├── memo.py                   # MemoManager for persistent LLM context
 │   │   ├── validation.py             # Pre-flight checks (DISABLED)
 │   │   └── providers/
 │   │       ├── __init__.py           # Provider factory
@@ -1187,26 +1347,32 @@ FSDTrader/
 │   └── test_execution.py             # 69 unit tests
 │
 └── BacktestData/                     # Git LFS tracked
-    └── TSLA-L3DATA/                  # Databento MBO files (~2.7GB)
-        ├── xnas-itch-YYYYMMDD.mbo.dbn.zst
-        └── TSLA_MBO_Data_Documentation.md
+    └── TSLA-L2DATA/                  # Databento MBP-10 files (~200MB)
+        ├── xnas-itch-YYYYMMDD.mbp-10.dbn.zst
+        ├── condition.json
+        ├── manifest.json
+        ├── metadata.json
+        └── symbology.json
 ```
 
 ---
 
 ## 12. Appendices
 
-### A. Sample MBO Event (Databento)
+### A. Sample MBP-10 Event (Databento)
 
 ```python
 event = {
-    "ts_event": 1729684200123456789,  # Nanoseconds since epoch
-    "action": "TRADE",                 # ADD | CANCEL | MODIFY | TRADE | FILL
-    "side": "ASK",                     # BID | ASK (which side was taken)
-    "price": 245500000000,             # Fixed-point (divide by 1e9)
+    "ts_event": 1729684200123456789,  # Nanoseconds since epoch (UTC)
+    "action": "TRADE",                 # TRADE | ADD | etc.
+    "price": 245500000000,             # Fixed-point (divide by 1e9) for trades
     "size": 100,                       # Shares
-    "order_id": 12345678,              # Unique order ID
-    "flags": 0                         # Event flags
+    "levels": [                        # 10 levels of aggregated depth
+        # BidAskPair with bid_px, ask_px, bid_sz, ask_sz
+        {"bid_px": 245490000000, "ask_px": 245510000000, "bid_sz": 500, "ask_sz": 300},
+        {"bid_px": 245480000000, "ask_px": 245520000000, "bid_sz": 800, "ask_sz": 450},
+        # ... 8 more levels
+    ]
 }
 ```
 
@@ -1275,7 +1441,7 @@ python main.py --live
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--symbol` | `TSLA` | Trading symbol |
-| `--backtest` | - | Backtest with MBO replay |
+| `--backtest` | - | Backtest with MBP-10 replay |
 | `--sim` | - | Simulation with mock data |
 | `--live` | - | Live trading (DANGER!) |
 | `--date` | latest file | Backtest date (YYYYMMDD) |
@@ -1294,6 +1460,8 @@ python main.py --live
 | 1.0.0 | 2025-01-24 | Initial DATA_LAYER.md |
 | 2.0.0 | 2025-01-24 | Comprehensive requirements combining all modules |
 | 3.0.0 | 2026-01-26 | Disabled brain & execution validation (LLM-driven risk management), added Groq provider, session-based LLM logging, shared ContextBuilder with price history, CLI time args, .env support, L2 data processing docs |
+| 3.1.0 | 2026-01-29 | Smart L2 processing: cumulative sizes (multiple market makers), percentile-based wall detection (MASSIVE/MAJOR/MINOR tiers at p95/p90/p75), dynamic stack depth (up to major wall), full-book imbalance, IBKR 50-level depth, book statistics |
+| 3.2.0 | 2026-01-31 | Memo system for persistent LLM context (@INIT/@DELTA chain), MBP-10 data format (replaced MBO/L3), MARKET_TIME field with UTC->ET conversion, wall detection fix (_update_percentiles), backtest timing sync (2s intervals) |
 
 ---
 
