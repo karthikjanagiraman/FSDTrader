@@ -193,7 +193,8 @@ class FSDTrader:
             speed=self.backtest_speed,
             on_state_update=self._on_backtest_state,
             start_time=self.backtest_start_time,
-            end_time=self.backtest_end_time
+            end_time=self.backtest_end_time,
+            decision_interval=LOOP_INTERVAL  # Match live trading interval (2.0s)
         )
 
         # Generate report
@@ -219,7 +220,22 @@ class FSDTrader:
             # Track price history for context with labels for key levels
             from datetime import datetime
             market = state.get("MARKET_STATE", {})
-            price_time = datetime.fromtimestamp(sim_time) if sim_time > 0 else datetime.now()
+            # Use MARKET_TIME string if available, otherwise convert sim_time to ET
+            market_time_str = market.get("MARKET_TIME")
+            if market_time_str:
+                # Parse the HH:MM:SS string into a datetime for today
+                h, m, s = map(int, market_time_str.split(":"))
+                price_time = datetime.now().replace(hour=h, minute=m, second=s, microsecond=0)
+            elif sim_time > 0:
+                # Fallback: convert UTC timestamp to ET (UTC-5)
+                time_of_day_utc = sim_time % 86400
+                time_of_day_et = (time_of_day_utc - 18000) % 86400  # UTC-5 for EST
+                h = int(time_of_day_et // 3600)
+                m = int((time_of_day_et % 3600) // 60)
+                s = int(time_of_day_et % 60)
+                price_time = datetime.now().replace(hour=h, minute=m, second=s, microsecond=0)
+            else:
+                price_time = datetime.now()
 
             # Determine label based on key level proximity
             label = None
@@ -403,11 +419,19 @@ class FSDTrader:
             # Get account state from executor
             account_state = self.executor.get_account_state()
 
+            # Convert sim_time to market time string
+            sim_time_of_day = sim_time % 86400
+            sim_hours = int(sim_time_of_day // 3600)
+            sim_minutes = int((sim_time_of_day % 3600) // 60)
+            sim_seconds = int(sim_time_of_day % 60)
+            market_time_str = f"{sim_hours:02d}:{sim_minutes:02d}:{sim_seconds:02d}"
+
             state = {
                 "MARKET_STATE": {
                     "TICKER": self.symbol,
                     "LAST": current_price,
                     "VWAP": base_price - 0.40,
+                    "MARKET_TIME": market_time_str,  # Simulation time for LLM context
                     "TIME_SESSION": "OPEN_DRIVE",
                     "L2_IMBALANCE": random.uniform(0.8, 2.5),
                     "SPREAD": random.uniform(0.01, 0.03),

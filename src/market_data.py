@@ -965,11 +965,16 @@ class IBKRConnector:
         vah, val = profile.get_value_area()
         absorption = absorber.detect()
         
+        # Get current market time (wall clock for live trading)
+        from datetime import datetime
+        market_time_str = datetime.now().strftime("%H:%M:%S")
+
         return {
             "MARKET_STATE": {
                 "TICKER": symbol,
                 "LAST": last_price,
                 "VWAP": metrics.vwap,
+                "MARKET_TIME": market_time_str,  # Current time in ET for LLM context
                 "TIME_SESSION": metrics.get_time_session(),
                 
                 # Level 2 (DOM) - Smart processing with cumulative sizes

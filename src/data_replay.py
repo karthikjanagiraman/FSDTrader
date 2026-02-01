@@ -136,7 +136,7 @@ class DataReplayConnector:
         on_state_update: Callable = None,
         start_time: str = "09:30:00",
         end_time: str = "16:00:00",
-        decision_interval: float = 5.0
+        decision_interval: float = 2.0
     ):
         """
         Start replaying the data.
@@ -146,7 +146,7 @@ class DataReplayConnector:
             on_state_update: Callback called every decision_interval of SIMULATION time
             start_time: Start time in HH:MM:SS (default market open)
             end_time: End time in HH:MM:SS (default market close)
-            decision_interval: Seconds of simulation time between decisions (default 5.0)
+            decision_interval: Seconds of simulation time between decisions (default 2.0)
         """
         self.replay_speed = speed
         self.is_replaying = True
@@ -287,6 +287,9 @@ class DataReplayConnector:
                         if 0 < ask_price < 10000 and level.ask_sz > 0:
                             book.asks[round(ask_price, 2)] = level.ask_sz
 
+                # Update percentiles for wall detection after populating book
+                book._update_percentiles()
+
             # Get current best bid/ask
             best_bid = self._get_best_bid()
             best_ask = self._get_best_ask()
@@ -396,11 +399,26 @@ class DataReplayConnector:
         vah, val = profile.get_value_area()
         absorption = absorber.detect()
 
+        # Convert simulation timestamp to market time string (ET)
+        # Timestamps are in UTC, convert to ET (UTC-5 during EST, UTC-4 during EDT)
+        # For simplicity, using fixed UTC-5 offset for market hours
+        sim_time_utc = self.current_simulation_time
+        # Get time of day in seconds from UTC timestamp
+        time_of_day_utc = sim_time_utc % 86400
+        # Convert to ET (subtract 5 hours = 18000 seconds for EST)
+        time_of_day_et = (time_of_day_utc - 18000) % 86400
+        hours = int(time_of_day_et // 3600)
+        minutes = int((time_of_day_et % 3600) // 60)
+        seconds = int(time_of_day_et % 60)
+        market_time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
         return {
             "MARKET_STATE": {
                 "TICKER": symbol,
                 "LAST": last_price,
                 "VWAP": metrics.vwap,
+                "MARKET_TIME": market_time_str,  # Market time in ET for LLM context
+                "MARKET_TIMESTAMP": self.current_simulation_time,  # Raw timestamp
                 "TIME_SESSION": metrics.get_time_session(timestamp=self.current_simulation_time),
 
                 # Level 2 (DOM) - 10-level depth from MBP-10
@@ -516,7 +534,7 @@ async def test_replay():
         on_state_update=on_update,
         start_time="09:30:00",
         end_time="09:31:00",
-        decision_interval=5.0
+        decision_interval=2.0  # Match live trading interval
     )
 
     print(f"\nStats: {replayer.get_stats()}")

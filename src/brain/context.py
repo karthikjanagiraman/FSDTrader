@@ -163,6 +163,8 @@ FLAT - Looking for entry opportunity."""
         """Build the session context section with trend analysis."""
         mkt = market_state.get("MARKET_STATE", market_state)
 
+        # Use market time if available (from simulation), fall back to wall clock
+        market_time = mkt.get("MARKET_TIME", datetime.now().strftime("%H:%M:%S"))
         time_session = mkt.get("TIME_SESSION", "UNKNOWN")
         last_price = mkt.get("LAST", 0)
         vwap = mkt.get("VWAP", 0)
@@ -209,7 +211,7 @@ FLAT - Looking for entry opportunity."""
 
         return f"""## SESSION CONTEXT
 
-├── Time: {datetime.now().strftime("%H:%M:%S")} ET
+├── Time: {market_time} ET
 ├── Session: {time_session}
 ├── Spread Limit: ${spread_limit:.2f}
 │
@@ -301,9 +303,9 @@ FLAT - Looking for entry opportunity."""
             context_str = f"  ({', '.join(context_parts)})" if context_parts else ""
             lines.append(f"{time_str}  ${price:.2f}{context_str}")
 
-        # Add current price with NOW marker
-        now_str = datetime.now().strftime("%H:%M:%S")
-        lines.append(f"{now_str}  ${current_price:.2f}  <- NOW")
+        # Add current price with NOW marker - use market time if available
+        market_time = mkt.get("MARKET_TIME", datetime.now().strftime("%H:%M:%S"))
+        lines.append(f"{market_time}  ${current_price:.2f}  <- NOW")
 
         # Add pattern interpretation if detected
         if len(history_list) >= 4:

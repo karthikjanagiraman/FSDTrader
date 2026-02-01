@@ -153,8 +153,8 @@ class TradingBrain:
             account_state = state.get("ACCOUNT_STATE", {})
             active_orders = state.get("ACTIVE_ORDERS", [])
 
-            # Get current timestamp for memo
-            current_time = datetime.now().strftime("%H:%M:%S")
+            # Get market time for memo (use simulation time if available, else wall clock)
+            current_time = market_state.get("MARKET_TIME", datetime.now().strftime("%H:%M:%S"))
 
             # Get current position status
             position_status = account_state.get("POSITION_SIDE", "FLAT")
