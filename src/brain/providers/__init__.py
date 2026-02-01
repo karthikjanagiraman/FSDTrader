@@ -7,6 +7,7 @@ Provider factory and exports.
 from .base import LLMProvider
 from .grok import GrokProvider
 from .groq import GroqProvider
+from .anthropic import AnthropicProvider
 
 
 def get_provider(provider_name: str, **kwargs) -> LLMProvider:
@@ -26,9 +27,9 @@ def get_provider(provider_name: str, **kwargs) -> LLMProvider:
     providers = {
         "grok": GrokProvider,
         "groq": GroqProvider,
+        "anthropic": AnthropicProvider,
         # Future providers:
         # "openai": OpenAIProvider,
-        # "anthropic": AnthropicProvider,
     }
 
     provider_class = providers.get(provider_name.lower())
@@ -43,5 +44,6 @@ __all__ = [
     "LLMProvider",
     "GrokProvider",
     "GroqProvider",
+    "AnthropicProvider",
     "get_provider",
 ]

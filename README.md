@@ -13,7 +13,7 @@ FSDTrader is a momentum/scalping system that uses Large Language Models (LLMs) w
 ### Key Features
 
 - **Order Flow Analysis**: Real-time L2 market data processing with 7 specialized analyzers
-- **LLM Decision Engine**: Native function calling for structured trade decisions (Groq, Grok, OpenAI)
+- **LLM Decision Engine**: Native function calling for structured trade decisions (Anthropic, Groq, Grok)
 - **Memo System**: Persistent LLM context via self-notes (@INIT/@DELTA chain)
 - **Bracket Order Execution**: Automated stop loss and profit target management
 - **Multi-Mode Operation**: Backtest, simulation, paper, and live trading
@@ -48,8 +48,8 @@ FSDTrader is a momentum/scalping system that uses Large Language Models (LLMs) w
       │                      │                       │
  ┌────┴────┐           ┌─────┴─────┐          ┌──────┴──────┐
  ▼         ▼           ▼           ▼          ▼             ▼
-IBKR    MBP-10      Groq/Grok   OpenAI    Simulated      IBKR
-Connector  Replay   Provider   Provider   Executor     Executor
+IBKR    MBP-10      Anthropic  Groq/Grok  Simulated      IBKR
+Connector  Replay   Provider   Providers   Executor     Executor
 ```
 
 ### Modules
@@ -181,7 +181,7 @@ python src/main.py --symbol TSLA
 python src/main.py --live --symbol TSLA
 
 # Use different LLM provider
-python src/main.py --provider groq --model llama-3.3-70b-versatile
+python src/main.py --provider anthropic --model claude-3-haiku-20240307
 ```
 
 ### Command Line Options
@@ -194,7 +194,7 @@ python src/main.py --provider groq --model llama-3.3-70b-versatile
 | `--speed` | 100 | Backtest speed multiplier |
 | `--sim` | - | Enable simulation mode |
 | `--live` | - | Enable live trading |
-| `--provider` | groq | LLM provider (groq, grok, openai) |
+| `--provider` | groq | LLM provider (anthropic, groq, grok) |
 | `--model` | - | Model override |
 
 ---
@@ -216,6 +216,7 @@ FSDTrader/
 │   │   ├── validation.py    # Pre-flight tool call validation
 │   │   └── providers/
 │   │       ├── base.py      # LLMProvider ABC
+│   │       ├── anthropic.py # Anthropic Claude provider
 │   │       ├── grok.py      # xAI Grok provider
 │   │       └── groq.py      # Groq provider
 │   ├── execution/
@@ -336,9 +337,9 @@ python -m pytest tests/test_execution.py -v
 
 | Variable | Description |
 |----------|-------------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (for Claude models) |
 | `XAI_API_KEY` or `GROK_API_KEY` | Grok API key |
 | `GROQ_API_KEY` | Groq API key |
-| `OPENAI_API_KEY` | OpenAI API key |
 | `IBKR_PORT` | TWS port (default: 7497) |
 
 ---
