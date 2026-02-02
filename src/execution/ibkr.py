@@ -623,6 +623,21 @@ class IBKRExecutor(ExecutionProvider):
         except Exception:
             pass
 
+        # Get last trade info if available
+        last_trade = None
+        if self._trade_history:
+            lt = self._trade_history[-1]
+            last_trade = {
+                "side": lt.side,
+                "size": lt.size,
+                "entry_price": lt.entry_price,
+                "exit_price": lt.exit_price,
+                "pnl": lt.pnl,
+                "exit_reason": lt.exit_reason,
+                "duration_seconds": lt.duration_seconds,
+                "exit_time": lt.exit_time,
+            }
+
         return {
             "POSITION": self._position.size,
             "POSITION_SIDE": self._position.side.value,
@@ -632,6 +647,7 @@ class IBKRExecutor(ExecutionProvider):
             "DAILY_TRADES": self._daily_trades,
             "BUYING_POWER": round(buying_power, 2),
             "DAILY_LOSS_REMAINING": round(daily_loss_remaining, 2),
+            "LAST_TRADE": last_trade,
         }
 
     def get_active_orders(self) -> List[Dict[str, Any]]:

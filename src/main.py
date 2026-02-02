@@ -285,6 +285,14 @@ class FSDTrader:
             # Log Decision to console
             self._log_decision(state, command, result)
 
+            # Early stop: MAX_TRADES_HIT with no active position = no more useful work
+            if result.get("error") == "MAX_TRADES_HIT" and account_state.get("POSITION") == 0:
+                self.logger.warning(
+                    f"{Fore.YELLOW}MAX_TRADES_HIT with FLAT position - stopping to save LLM budget"
+                )
+                self.running = False
+                return
+
         except Exception as e:
             self.logger.error(f"Backtest Error: {e}")
     
@@ -390,6 +398,13 @@ class FSDTrader:
 
                 self._log_decision(state, command, result)
 
+                # Early stop: MAX_TRADES_HIT with no active position = no more useful work
+                if result.get("error") == "MAX_TRADES_HIT" and account_state.get("POSITION") == 0:
+                    self.logger.warning(
+                        f"{Fore.YELLOW}MAX_TRADES_HIT with FLAT position - stopping to save LLM budget"
+                    )
+                    break
+
             except Exception as e:
                 self.logger.error(f"Loop Error: {e}")
 
@@ -470,6 +485,13 @@ class FSDTrader:
             market_context = state.get("MARKET_STATE", {})
             result = self.executor.execute(command, context=market_context)
             self._log_decision(state, command, result)
+
+            # Early stop: MAX_TRADES_HIT with no active position = no more useful work
+            if result.get("error") == "MAX_TRADES_HIT" and account_state.get("POSITION") == 0:
+                self.logger.warning(
+                    f"{Fore.YELLOW}MAX_TRADES_HIT with FLAT position - stopping to save LLM budget"
+                )
+                break
 
             await asyncio.sleep(0.5)  # Slow down for visibility
     

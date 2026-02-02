@@ -207,9 +207,15 @@ class DataReplayConnector:
             # Progress logging
             if time.time() - last_progress_log > 2.0:
                 pct = (i / total_events) * 100
-                sim_time_str = time.strftime('%H:%M:%S', time.gmtime(self.current_simulation_time % 86400))
+                # Convert to ET (UTC-5 for EST)
+                time_of_day_utc = self.current_simulation_time % 86400
+                time_of_day_et = (time_of_day_utc - 18000) % 86400
+                hours = int(time_of_day_et // 3600)
+                minutes = int((time_of_day_et % 3600) // 60)
+                seconds = int(time_of_day_et % 60)
+                sim_time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                 self.logger.info(
-                    f"Replay: {pct:.1f}% | Sim time: {sim_time_str} | "
+                    f"Replay: {pct:.1f}% | Sim time: {sim_time_str} ET | "
                     f"Events: {i:,}/{total_events:,} | Trades: {self.trades_count:,}"
                 )
                 last_progress_log = time.time()

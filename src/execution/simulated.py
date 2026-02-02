@@ -358,6 +358,22 @@ class SimulatedExecutor(ExecutionProvider):
     def get_account_state(self) -> Dict[str, Any]:
         """Get account state for Brain context."""
         daily_loss_remaining = abs(self.risk_limits.max_daily_loss) - abs(min(0, self._daily_pnl))
+
+        # Get last trade info if available
+        last_trade = None
+        if self._trade_history:
+            lt = self._trade_history[-1]
+            last_trade = {
+                "side": lt.side,
+                "size": lt.size,
+                "entry_price": lt.entry_price,
+                "exit_price": lt.exit_price,
+                "pnl": lt.pnl,
+                "exit_reason": lt.exit_reason,
+                "duration_seconds": lt.duration_seconds,
+                "exit_time": lt.exit_time,
+            }
+
         return {
             "POSITION": self._position.size,
             "POSITION_SIDE": self._position.side.value,
@@ -367,6 +383,7 @@ class SimulatedExecutor(ExecutionProvider):
             "DAILY_TRADES": self._daily_trades,
             "BUYING_POWER": 100000.0,  # Simulated unlimited buying power
             "DAILY_LOSS_REMAINING": round(daily_loss_remaining, 2),
+            "LAST_TRADE": last_trade,
         }
 
     def get_active_orders(self) -> List[Dict[str, Any]]:

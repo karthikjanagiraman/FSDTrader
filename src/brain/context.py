@@ -127,9 +127,48 @@ class ContextBuilder:
         position_size = account_state.get("POSITION", 0)
 
         if position_side == "FLAT" or position_size == 0:
-            return """## CURRENT POSITION
+            # Check for last trade info
+            last_trade = account_state.get("LAST_TRADE")
+            daily_pnl = account_state.get("DAILY_PL", 0)
+            daily_trades = account_state.get("DAILY_TRADES", 0)
 
-FLAT - Looking for entry opportunity."""
+            if last_trade:
+                # Format last trade details
+                lt_side = last_trade.get("side", "?")
+                lt_entry = last_trade.get("entry_price", 0)
+                lt_exit = last_trade.get("exit_price", 0)
+                lt_pnl = last_trade.get("pnl", 0)
+                lt_reason = last_trade.get("exit_reason", "UNKNOWN")
+                lt_duration = last_trade.get("duration_seconds", 0)
+
+                # Format duration
+                if lt_duration >= 60:
+                    duration_str = f"{int(lt_duration // 60)}m {int(lt_duration % 60)}s"
+                else:
+                    duration_str = f"{int(lt_duration)}s"
+
+                pnl_sign = "+" if lt_pnl >= 0 else ""
+                result_label = "WIN" if lt_pnl > 0 else "LOSS" if lt_pnl < 0 else "FLAT"
+
+                return f"""## CURRENT POSITION
+
+FLAT - Looking for entry opportunity.
+
+### LAST TRADE
+├── {lt_side} @ ${lt_entry:.2f} -> ${lt_exit:.2f}
+├── Result: {result_label} ({pnl_sign}${lt_pnl:.2f})
+├── Exit: {lt_reason}
+├── Duration: {duration_str}
+│
+├── Daily P&L: ${daily_pnl:.2f}
+└── Daily Trades: {daily_trades}"""
+            else:
+                return f"""## CURRENT POSITION
+
+FLAT - Looking for entry opportunity.
+
+├── Daily P&L: ${daily_pnl:.2f}
+└── Daily Trades: {daily_trades}"""
 
         avg_entry = account_state.get("AVG_ENTRY", 0)
         unrealized_pnl = account_state.get("UNREALIZED_PL", 0)

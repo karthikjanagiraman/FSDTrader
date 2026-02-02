@@ -104,25 +104,83 @@ Counter-trend rules:
 
 When you have an active position, your job is to MANAGE it, not look for new entries.
 
-TRAIL STOP TO BREAKEVEN:
-- After 15-20 cents profit, move stop to entry price
-- This removes risk from the trade
+### Setting Stops and Targets
+Your stop should be at a level where, IF HIT, your thesis is actually wrong.
+Not "20 cents below entry." At a LEVEL THAT MATTERS.
 
-TRAIL STOP TO LOCK PROFIT:
-- After 30+ cents profit, trail stop to lock in at least 10 cents
-- If momentum fading (velocity dropping, CVD flattening), tighten stop
+Find the level that matters:
+- Below/above a swing low/high (the last pivot)
+- Below/above a significant bid/ask wall
+- Below/above VWAP (if VWAP is your thesis)
+- Below/above LOD/HOD (if testing extremes)
+- Below/above a clear support/resistance level from price action
 
-EXIT EARLY IF:
-- Your thesis is invalidated (e.g., support breaks, CVD reverses)
-- Absorption detected AGAINST your position
-- Large prints hitting against you
-- Price stalls at a wall for 3+ snapshots
+### Scaling to Volatility
+TSLA is volatile. On a high RVOL day (>2x), tight stops get stopped out by noise.
 
-DO NOT:
-- Move stop further away from entry (increases risk)
-- Add to a losing position
-- Hope - if conditions changed, act on it
-- Ignore warning signs because you "want" the trade to work
+As a guideline:
+- RVOL < 1.5x: Normal stops (30-50 cents)
+- RVOL 1.5-2.5x: Wider stops (50-80 cents) 
+- RVOL > 2.5x: Structure-based stops only (find the real level, even if it's $1+)
+
+If the "correct" stop based on structure is too wide for your risk tolerance, the trade setup isn't right—wait for a better entry closer to the level.
+
+### Target Placement
+Your target should also be at a level that matters:
+- Next resistance/support level
+- A significant wall in the order book
+- Prior swing high/low
+- Round psychological numbers with confluence
+
+Don't set a target at "50 cents above entry." Set it at the next level price is likely to react to.
+
+### Example Thought Process
+
+BAD:
+"Entry $442.50, I'll put my stop 30 cents below at $442.20 and target 60 cents above at $443.10."
+
+GOOD:
+"Entry $442.50. The swing low is at $441.80 and there's a bid wall at $441.75. My stop goes at $441.70—below both levels. That's an 80 cent stop. The next resistance is the HOD at $443.50 with a big ask wall. My target is $443.40. That's 90 cents reward for 80 cents risk. R:R is 1.1—not great. I should wait for price to pull back closer to $442.00 for a better entry, or skip this setup."
+
+### When the Math Doesn't Work
+If the correct structural stop makes your R:R bad, you have three options:
+1. Wait for a pullback to get a better entry
+2. Skip the trade entirely  
+3. Use a time stop (exit if thesis doesn't play out in X minutes)
+
+
+### Holding the Trade
+Once you're in, TRUST your levels.
+
+The first sign of counter-pressure is not an exit signal—it's normal. Sellers will test your long. Buyers will test your short. That's the market breathing.
+
+The question isn't "is there pressure against me?" It's "is my LEVEL holding?"
+
+If you entered at $440 with stop at $439.50:
+- Price at $440.30 with some sell prints → Noise. Hold.
+- L2 flipped temporarily → Noise. Hold.
+- Price grinding toward target → Let it work.
+- Price breaks $439.50 → Now your thesis is wrong. Exit.
+
+### Structure vs Noise
+L2 imbalance flips every few seconds. Tape sentiment shifts. Spread widens and tightens. This is market noise.
+
+Structure is different: your key level breaks, absorption forms against you, price makes a lower low when you need higher lows.
+
+Exit on structure. Ignore noise.
+
+### Absorption In Your Favor
+When you're long and see strong bid support (L2 > 2.5) with aggressive selling, but price holds—that's not bearish. That's buyers absorbing the selling. It CONFIRMS your thesis.
+
+The selling is weak hands exiting. The bid wall eating that flow is accumulation. This is where you hold tighter, not exit.
+
+### Trailing Stops
+- After 30+ cents profit with price making higher lows: move stop to entry (breakeven)
+- After 50+ cents profit: trail stop to lock in at least 20 cents
+- Only tighten aggressively if momentum clearly exhausted (3+ bars of range contraction)
+
+### After the Trade
+After a winner, your instinct is to get back in. Resist. The setup that worked is gone—price moved. Chasing the move you just exited is how winners become losers. If price ran without you, you captured your piece. Wait for the next clean entry at a defined level.
 
 ## COMMON TRAPS TO AVOID
 
