@@ -96,6 +96,10 @@ class IBKRExecutor(ExecutionProvider):
         # Current price for P&L
         self._current_price: float = 0.0
 
+        # Fill timestamp for race condition protection
+        self._last_fill_time: float = 0.0
+        self._fill_cooldown: float = 2.0  # seconds to wait after fill before trusting broker position
+
         # Hook into IBKR events
         self.ib.orderStatusEvent += self._on_order_status
         self.ib.execDetailsEvent += self._on_execution
@@ -142,13 +146,28 @@ class IBKRExecutor(ExecutionProvider):
                     )
                 break
 
-    def _get_broker_position(self) -> Optional[Dict[str, Any]]:
+    def _get_broker_position(self, trust_internal_during_cooldown: bool = True) -> Optional[Dict[str, Any]]:
         """Get current position from broker.
+
+        Args:
+            trust_internal_during_cooldown: If True and we're within cooldown period
+                after a fill, return None to trust internal state instead.
 
         Returns:
             Dict with 'qty' (positive=long, negative=short) and 'avg_cost',
-            or None if no position.
+            or None if no position (or in cooldown period).
         """
+        # During fill cooldown, broker position may be stale/transitioning
+        # Trust internal state instead
+        if trust_internal_during_cooldown and self._last_fill_time > 0:
+            elapsed = time.time() - self._last_fill_time
+            if elapsed < self._fill_cooldown:
+                self.logger.debug(
+                    f"Within fill cooldown ({elapsed:.1f}s < {self._fill_cooldown}s), "
+                    "trusting internal position state"
+                )
+                return None  # Caller should trust internal state
+
         for pos in self.ib.positions():
             if pos.contract.symbol == self.symbol:
                 return {'qty': pos.position, 'avg_cost': pos.avgCost}
@@ -361,10 +380,34 @@ class IBKRExecutor(ExecutionProvider):
         internal state is out of sync.
         """
         # Check BROKER position (not internal state) - this is the source of truth
+        # Note: _get_broker_position returns None during fill cooldown
         broker_pos = self._get_broker_position()
 
-        if broker_pos is None or broker_pos['qty'] == 0:
-            # No broker position - correct internal state if needed
+        if broker_pos is None:
+            # Could be cooldown period - check if we have internal position
+            if not self._position.is_flat():
+                # During cooldown, use internal state
+                elapsed = time.time() - self._last_fill_time if self._last_fill_time else 999
+                if elapsed < self._fill_cooldown:
+                    self.logger.info(
+                        f"In fill cooldown ({elapsed:.1f}s), using internal position for exit"
+                    )
+                    # Proceed with exit using internal state
+                    broker_pos = {
+                        'qty': self._position.size if self._position.side == PositionSide.LONG else -self._position.size,
+                        'avg_cost': self._position.avg_entry
+                    }
+                else:
+                    self.logger.warning(
+                        "Internal shows position but broker is FLAT. Correcting internal state."
+                    )
+                    self._position = Position()
+                    self._active_bracket = None
+                    return OrderResult(success=False, error="NO_BROKER_POSITION")
+            else:
+                return OrderResult(success=False, error="NO_POSITION")
+
+        if broker_pos['qty'] == 0:
             if not self._position.is_flat():
                 self.logger.warning(
                     "Internal shows position but broker is FLAT. Correcting internal state."
@@ -460,7 +503,7 @@ class IBKRExecutor(ExecutionProvider):
             )
 
     def _cancel_bracket_orders(self) -> None:
-        """Cancel remaining bracket orders."""
+        """Cancel remaining bracket orders (if not already cancelled/filled)."""
         if not self._active_bracket:
             return
 
@@ -471,9 +514,15 @@ class IBKRExecutor(ExecutionProvider):
             if order_id in self._pending_orders:
                 try:
                     trade = self._pending_orders[order_id]
-                    self.ib.cancelOrder(trade.order)
-                except Exception:
-                    pass
+                    # Only cancel if order is in a cancellable state
+                    status = trade.orderStatus.status
+                    if status in ('PreSubmitted', 'Submitted'):
+                        self.ib.cancelOrder(trade.order)
+                        self.logger.debug(f"Cancelling order {order_id} (status: {status})")
+                    else:
+                        self.logger.debug(f"Order {order_id} not cancellable (status: {status})")
+                except Exception as e:
+                    self.logger.debug(f"Cancel order {order_id} error (may already be closed): {e}")
 
     # =========================================================================
     # IBKR Event Handlers
@@ -511,6 +560,9 @@ class IBKRExecutor(ExecutionProvider):
             self._active_bracket.status = "FILLED"
             self._active_bracket.fill_price = fill_price
             self._active_bracket.fill_time = time.time()
+
+            # Set fill cooldown to protect against broker position race condition
+            self._last_fill_time = time.time()
 
             self._position = Position(
                 side=PositionSide.LONG if self._active_bracket.side == "BUY" else PositionSide.SHORT,
@@ -550,9 +602,13 @@ class IBKRExecutor(ExecutionProvider):
         if other_order_id and other_order_id in self._pending_orders:
             try:
                 trade = self._pending_orders[other_order_id]
-                self.ib.cancelOrder(trade.order)
-            except Exception:
-                pass
+                # Only cancel if order is in a cancellable state
+                status = trade.orderStatus.status
+                if status in ('PreSubmitted', 'Submitted'):
+                    self.ib.cancelOrder(trade.order)
+                    self.logger.debug(f"Cleaning up bracket order {other_order_id}")
+            except Exception as e:
+                self.logger.debug(f"Cleanup cancel error (may already be closed): {e}")
 
     def _close_position(self, exit_price: float, reason: str, timestamp: float) -> None:
         """Close position and record trade."""

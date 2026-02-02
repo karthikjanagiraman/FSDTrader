@@ -206,8 +206,9 @@ class ExecutionProvider(ABC):
                 key, value = part.split("=", 1)
                 args[key.strip()] = value.strip()
 
-        # Pre-flight risk checks
-        if hasattr(self, 'risk_limits'):
+        # Pre-flight risk checks (only for entries, not exits/waits)
+        is_entry_command = cmd_name in ("ENTER_LONG", "ENTER_SHORT")
+        if is_entry_command and hasattr(self, 'risk_limits'):
             if self._daily_pnl <= self.risk_limits.max_daily_loss:
                 return {"success": False, "error": "MAX_DAILY_LOSS_HIT", "command": command}
             if self._daily_trades >= self.risk_limits.max_daily_trades:

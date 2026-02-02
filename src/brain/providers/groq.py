@@ -151,6 +151,18 @@ class GroqProvider(LLMProvider):
                     logger.warning(f"Groq rate limited, retrying in {retry_delay:.1f}s (attempt {attempt + 1}/{MAX_RETRIES})")
                     time.sleep(retry_delay)
                     continue
+                elif e.response.status_code == 400:
+                    # Check for malformed tool call (XML-style fallback)
+                    parsed = self._try_parse_malformed_tool_call(e.response.text)
+                    if parsed:
+                        latency_ms = (time.time() - start_time) * 1000
+                        return LLMResponse(
+                            tool_calls=parsed,
+                            content=None,
+                            model=self._model,
+                            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                            latency_ms=latency_ms,
+                        )
                 logger.error(f"Groq API error: {e.response.status_code} - {e.response.text}")
                 raise
             except Exception as e:
@@ -170,6 +182,122 @@ class GroqProvider(LLMProvider):
                 return value / 1000.0
             return value
         return DEFAULT_RETRY_DELAY
+
+    def _try_parse_malformed_tool_call(self, error_text: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Try to parse malformed XML-style tool calls from Groq error responses.
+
+        When Llama models sometimes fall back to XML-style function calling:
+        <function=tool_name>{"arg": "value"}</function>
+
+        This recovers those calls from the failed_generation field.
+
+        Args:
+            error_text: Raw error response text from Groq API
+
+        Returns:
+            Parsed tool calls if successful, None otherwise
+        """
+        try:
+            error_data = json.loads(error_text)
+            failed_gen = error_data.get("error", {}).get("failed_generation", "")
+
+            if not failed_gen:
+                return None
+
+            # Pattern: <function=tool_name>{...json...}</function>
+            # Use greedy match for JSON content to capture full nested structure
+            pattern = r'<function=(\w+)>(\{.+\})</function>'
+            match = re.search(pattern, failed_gen, re.DOTALL)
+
+            if not match:
+                # Fallback: try to extract tool name and JSON without closing tag
+                pattern_no_close = r'<function=(\w+)>(\{.+\})\s*$'
+                match = re.search(pattern_no_close, failed_gen, re.DOTALL)
+
+            if match:
+                tool_name = match.group(1)
+                args_str = match.group(2)
+
+                # Try to parse JSON, with fallback for broken JSON from memo quotes
+                arguments = self._parse_tool_args_robust(args_str)
+                if arguments is None:
+                    # Can't parse - just return a minimal valid tool call
+                    # This allows wait/exit to work even with broken JSON
+                    if tool_name == "wait":
+                        logger.info(f"Recovered wait tool call with default args (JSON parse failed)")
+                        return [{"name": "wait", "arguments": {"reasoning": "Malformed tool call recovery", "memo": ""}}]
+                    elif tool_name == "exit_position":
+                        logger.info(f"Recovered exit_position tool call with default args (JSON parse failed)")
+                        return [{"name": "exit_position", "arguments": {"reasoning": "Malformed tool call recovery", "memo": ""}}]
+                    else:
+                        logger.warning(f"Failed to parse {tool_name} arguments, cannot recover")
+                        return None
+
+                # Coerce types
+                arguments = self._coerce_argument_types(tool_name, arguments)
+
+                logger.info(f"Recovered malformed tool call: {tool_name}")
+                return [{
+                    "name": tool_name,
+                    "arguments": arguments,
+                }]
+
+        except (json.JSONDecodeError, KeyError, AttributeError) as e:
+            logger.debug(f"Could not parse malformed tool call: {e}")
+
+        return None
+
+    def _parse_tool_args_robust(self, args_str: str) -> Optional[Dict[str, Any]]:
+        """
+        Try to parse tool arguments JSON with fallbacks for common issues.
+
+        The LLM sometimes produces JSON with unescaped quotes in string values,
+        particularly in the memo field. This tries multiple strategies to parse.
+        """
+        # First, try direct parse
+        try:
+            return json.loads(args_str)
+        except json.JSONDecodeError:
+            pass
+
+        # Try to fix common issue: unescaped quotes in memo field
+        # The memo often has patterns like: thesis:"Some text"
+        # which breaks JSON when the outer quotes aren't escaped
+        try:
+            # Replace unescaped quotes inside strings (heuristic)
+            # Look for patterns like thesis:" and replace the inner quotes
+            fixed = re.sub(r'thesis:"([^"]*)"', r'thesis:\\"\1\\"', args_str)
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting individual fields
+        try:
+            result = {}
+
+            # Extract reasoning
+            reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', args_str)
+            if reasoning_match:
+                result["reasoning"] = reasoning_match.group(1)
+
+            # Extract new_price (for update_stop/update_target)
+            price_match = re.search(r'"new_price"\s*:\s*([0-9.]+)', args_str)
+            if price_match:
+                result["new_price"] = float(price_match.group(1))
+
+            # Extract memo (allow for broken quotes)
+            memo_match = re.search(r'"memo"\s*:\s*"(@[^}]+)"?\}', args_str)
+            if memo_match:
+                result["memo"] = memo_match.group(1)
+
+            if result:
+                return result
+        except Exception:
+            pass
+
+        logger.debug(f"All JSON parse strategies failed for: {args_str[:200]}")
+        return None
 
     async def call_async(
         self,
